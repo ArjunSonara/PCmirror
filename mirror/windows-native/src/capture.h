@@ -1,0 +1,49 @@
+#pragma once
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <wrl/client.h>
+#include <vector>
+#include <cstdint>
+
+using Microsoft::WRL::ComPtr;
+
+class DesktopCapture {
+public:
+    bool Init(UINT outputIndex = 0);
+    bool GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UINT& outHeight, UINT& outStride, UINT timeoutMs = 100);
+    void Shutdown();
+
+    UINT GetWidth() const { return width_; }
+    UINT GetHeight() const { return height_; }
+
+private:
+    void DrawCursor(uint8_t* pFrame, UINT stride, const DXGI_OUTDUPL_FRAME_INFO& frameInfo);
+
+    ComPtr<ID3D11Device> device_;
+    ComPtr<ID3D11DeviceContext> context_;
+    ComPtr<IDXGIOutputDuplication> duplication_;
+    ComPtr<ID3D11Texture2D> stagingTexture_;
+    UINT width_ = 0;
+    UINT height_ = 0;
+    UINT outputIndex_ = 0;
+
+    RECT outputRect_ = {};
+
+    // GDI cursor fallback
+    HDC cursorHdc_ = NULL;
+    HBITMAP cursorBmp_ = NULL;
+    HBITMAP cursorOldBmp_ = NULL;
+    uint32_t* cursorPixels_ = nullptr;
+    const int cursorSize_ = 64;
+    HCURSOR lastCursorHandle_ = NULL;
+    int cursorHotX_ = 0;
+    int cursorHotY_ = 0;
+    bool cursorHasAlpha_ = false;
+
+    // DXGI hardware cursor cache
+    std::vector<uint8_t> pointerShapeBuf_;
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO pointerShapeInfo_ = {};
+    int lastPointerX_ = 0;
+    int lastPointerY_ = 0;
+    bool pointerVisible_ = false;
+};

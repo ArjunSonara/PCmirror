@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PC Mirror Glass-to-Glass Latency Stopwatch</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            background-color: #0b0f19;
+            color: #ffffff;
+            font-family: 'Consolas', 'Courier New', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+            user-select: none;
+        }
+        .header {
+            font-size: 24px;
+            letter-spacing: 2px;
+            color: #00ff88;
+            margin-bottom: 20px;
+            text-transform: uppercase;
+        }
+        .timer-box {
+            background: #151d2f;
+            border: 3px solid #00ff88;
+            border-radius: 16px;
+            padding: 40px 60px;
+            text-align: center;
+            box-shadow: 0 0 40px rgba(0, 255, 136, 0.2);
+        }
+        .time-display {
+            font-size: 96px;
+            font-weight: 900;
+            color: #ffffff;
+            letter-spacing: 4px;
+        }
+        .millis-display {
+            font-size: 48px;
+            color: #00ff88;
+            margin-top: 10px;
+        }
+        .frame-counter {
+            font-size: 28px;
+            color: #ffaa00;
+            margin-top: 20px;
+        }
+        .guide {
+            margin-top: 30px;
+            font-size: 16px;
+            color: #94a3b8;
+            max-width: 600px;
+            text-align: center;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">PC Mirror Latency Benchmark</div>
+    <div class="timer-box">
+        <div class="time-display" id="mainTime">00:00.000</div>
+        <div class="millis-display" id="rawMillis">0.0 ms</div>
+        <div class="frame-counter" id="frameCounter">Frame: 0</div>
+    </div>
+    <div class="guide">
+        <b>HOW TO BENCHMARK:</b><br>
+        Place phone next to PC monitor showing this stopwatch. Take a single high-speed photo or video covering both screens.
+        Subtract the phone's displayed timestamp from the PC's timestamp = <b>Glass-to-Glass Latency</b>.
+    </div>
+
+    <script>
+        const startTime = performance.now();
+        let frameCount = 0;
+        const mainTimeEl = document.getElementById('mainTime');
+        const rawMillisEl = document.getElementById('rawMillis');
+        const frameCounterEl = document.getElementById('frameCounter');
+
+        function update() {
+            const now = performance.now();
+            const elapsed = now - startTime;
+            frameCount++;
+
+            const totalSec = Math.floor(elapsed / 1000);
+            const min = String(Math.floor(totalSec / 60)).padStart(2, '0');
+            const sec = String(totalSec % 60).padStart(2, '0');
+            const ms = String(Math.floor(elapsed % 1000)).padStart(3, '0');
+
+            mainTimeEl.textContent = `${min}:${sec}.${ms}`;
+            rawMillisEl.textContent = `${elapsed.toFixed(1)} ms`;
+            frameCounterEl.textContent = `Frame: ${frameCount}`;
+
+            requestAnimationFrame(update);
+        }
+        requestAnimationFrame(update);
+    </script>
+</body>
+</html>

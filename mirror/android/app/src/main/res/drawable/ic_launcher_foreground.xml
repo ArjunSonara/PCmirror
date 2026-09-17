@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- PC Monitor Frame (Left) -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M24,32 h36 c2.2,0 4,1.8 4,4 v24 c0,2.2 -1.8,4 -4,4 h-36 c-2.2,0 -4,-1.8 -4,-4 v-24 c0,-2.2 1.8,-4 4,-4 z" />
+    <path
+        android:fillColor="#0B0F19"
+        android:pathData="M27,35 h30 c1.1,0 2,0.9 2,2 v18 c0,1.1 -0.9,2 -2,2 h-30 c-1.1,0 -2,-0.9 -2,-2 v-18 c0,-1.1 0.9,-2 2,-2 z" />
+    <!-- PC Stand -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M39,64 h6 v6 h-6 z M34,70 h16 v2 h-16 z" />
+
+    <!-- Smartphone Frame (Right, Overlapping / Mirroring) -->
+    <path
+        android:fillColor="#7C4DFF"
+        android:pathData="M60,42 h20 c2.2,0 4,1.8 4,4 v28 c0,2.2 -1.8,4 -4,4 h-20 c-2.2,0 -4,-1.8 -4,-4 v-28 c0,-2.2 1.8,-4 4,-4 z" />
+    <path
+        android:fillColor="#0B0F19"
+        android:pathData="M63,45 h14 c1.1,0 2,0.9 2,2 v22 c0,1.1 -0.9,2 -2,2 h-14 c-1.1,0 -2,-0.9 -2,-2 v-22 c0,-1.1 0.9,-2 2,-2 z" />
+
+    <!-- Ultra-Low Latency Lightning / Mirror Stream Icon in Center -->
+    <path
+        android:fillColor="#FFD600"
+        android:pathData="M52,38 L44,52 L51,52 L48,66 L60,50 L53,50 Z" />
+</vector>

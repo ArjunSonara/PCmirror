@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:background="@drawable/bg_dashboard_card"
+    android:padding="12dp"
+    android:layout_marginBottom="8dp">
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/tvPresetItemName"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="GTA Ultrawide"
+            android:textColor="#FFFFFF"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tvPresetItemDetails"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Scale: 125% | Safe Fit"
+            android:textColor="#79C0FF"
+            android:textSize="11sp"
+            android:layout_marginTop="2dp" />
+    </LinearLayout>
+
+    <Button
+        android:id="@+id/btnApplyPreset"
+        android:layout_width="wrap_content"
+        android:layout_height="32dp"
+        android:background="@drawable/bg_button_glow"
+        android:text="Apply"
+        android:textColor="#090D14"
+        android:textStyle="bold"
+        android:textSize="11sp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:layout_marginEnd="6dp" />
+
+    <Button
+        android:id="@+id/btnDeletePreset"
+        android:layout_width="36dp"
+        android:layout_height="32dp"
+        android:background="@drawable/bg_button_secondary"
+        android:text="✕"
+        android:textColor="#FF8A80"
+        android:textSize="13sp" />
+</LinearLayout>

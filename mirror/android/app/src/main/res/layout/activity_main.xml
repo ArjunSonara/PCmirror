@@ -1,0 +1,609 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/rootContainer"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#090D14">
+
+    <!-- Video Rendering Surface -->
+    <SurfaceView
+        android:id="@+id/surfaceView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center" />
+
+    <!-- In-Stream Floating Overlay (Gear Icon + Collapsible Controls) -->
+    <LinearLayout
+        android:id="@+id/floatingControls"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="10dp"
+        android:layout_marginEnd="12dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:visibility="gone">
+
+        <!-- Collapsible Controls Bar -->
+        <LinearLayout
+            android:id="@+id/floatingControlsPanel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="@drawable/bg_overlay_bar"
+            android:paddingStart="4dp"
+            android:paddingEnd="4dp"
+            android:paddingTop="3dp"
+            android:paddingBottom="3dp"
+            android:visibility="gone">
+
+            <Button
+                android:id="@+id/ratioToggleBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Ratio: Safe Fit"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/resToggleBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Res: 1080p"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/bitrateToggleBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Quality: 8M"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/lockScreenBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Lock: OFF"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/resetViewBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Reset View"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/savePresetBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#79C0FF"
+                android:background="@drawable/bg_button_secondary"
+                android:text="💾 Save"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/presetsMenuBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="📂 Presets"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/exitStreamBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#FF8A80"
+                android:background="#803A1616"
+                android:text="Dashboard" />
+        </LinearLayout>
+
+        <!-- Gear Icon Button to Toggle In-Stream Controls -->
+        <ImageButton
+            android:id="@+id/gearMenuBtn"
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:layout_marginStart="6dp"
+            android:background="@drawable/bg_gear_btn"
+            android:src="@drawable/ic_settings_gear"
+            android:scaleType="centerInside"
+            android:padding="8dp"
+            android:contentDescription="Stream Settings" />
+    </LinearLayout>
+
+    <!-- Main Dashboard UI -->
+    <ScrollView
+        android:id="@+id/dashboardView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:fillViewport="true"
+        android:background="#F0090D14">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingStart="24dp"
+            android:paddingEnd="24dp"
+            android:paddingTop="16dp"
+            android:paddingBottom="24dp">
+
+            <!-- Top Header -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="16dp">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="PC MIRROR ULTRA"
+                        android:textColor="#00E5FF"
+                        android:textStyle="bold"
+                        android:textSize="18sp"
+                        android:letterSpacing="0.05" />
+
+                    <TextView
+                        android:id="@+id/statusText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="● USB Auto-Connect Ready"
+                        android:textColor="#00E676"
+                        android:textSize="12sp"
+                        android:layout_marginTop="2dp" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/badgeStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:background="@drawable/bg_pill"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp"
+                    android:text="SUB-15MS LOW LATENCY"
+                    android:textColor="#00E676"
+                    android:textStyle="bold"
+                    android:textSize="10sp" />
+            </LinearLayout>
+
+            <!-- 2-Column Responsive Layout for Landscape Display -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+                <!-- Left Column: Primary Action & Ratio -->
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:layout_marginEnd="8dp">
+
+                    <!-- Option 1: Start Mirroring Card -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_dashboard_card"
+                        android:orientation="vertical"
+                        android:padding="16dp"
+                        android:layout_marginBottom="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="1. MIRRORING STREAM"
+                            android:textColor="#FFFFFF"
+                            android:textStyle="bold"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Connects via high-speed USB tunnel (ADB Reverse / RNDIS)."
+                            android:textColor="#8B949E"
+                            android:textSize="11sp"
+                            android:layout_marginTop="2dp"
+                            android:layout_marginBottom="10dp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:layout_marginBottom="10dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Host IP:"
+                                android:textColor="#C9D1D9"
+                                android:textSize="12sp"
+                                android:layout_marginEnd="8dp" />
+
+                            <EditText
+                                android:id="@+id/ipInput"
+                                android:layout_width="0dp"
+                                android:layout_height="36dp"
+                                android:layout_weight="1"
+                                android:background="#1F293D"
+                                android:paddingStart="8dp"
+                                android:paddingEnd="8dp"
+                                android:inputType="text"
+                                android:text="127.0.0.1"
+                                android:textColor="#FFFFFF"
+                                android:textSize="12sp" />
+                        </LinearLayout>
+
+                        <CheckBox
+                            android:id="@+id/autoConnectCheck"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Auto-Connect to PC on App Launch"
+                            android:textColor="#79C0FF"
+                            android:textSize="12sp"
+                            android:checked="true"
+                            android:layout_marginBottom="10dp" />
+
+                        <Button
+                            android:id="@+id/btnStartMirror"
+                            android:layout_width="match_parent"
+                            android:layout_height="44dp"
+                            android:background="@drawable/bg_button_glow"
+                            android:text="▶  START MIRRORING"
+                            android:textColor="#090D14"
+                            android:textStyle="bold"
+                            android:textSize="14sp" />
+                    </LinearLayout>
+
+                    <!-- Option 3: Select Aspect Ratio (5 Options) -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_dashboard_card"
+                        android:orientation="vertical"
+                        android:padding="16dp"
+                        android:layout_marginBottom="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="3. SELECT ASPECT RATIO"
+                            android:textColor="#FFFFFF"
+                            android:textStyle="bold"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Choose how the PC display conforms to your phone screen."
+                            android:textColor="#8B949E"
+                            android:textSize="11sp"
+                            android:layout_marginTop="2dp"
+                            android:layout_marginBottom="10dp" />
+
+                        <RadioGroup
+                            android:id="@+id/rgAspectRatios"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content">
+
+                            <RadioButton
+                                android:id="@+id/rbSafeFit"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Safe Fit (16:9 Letterbox — Zero distortion, camera safe)"
+                                android:textColor="#E6EDF3"
+                                android:textSize="11sp"
+                                android:checked="true" />
+
+                            <RadioButton
+                                android:id="@+id/rbFullStretch"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Full Screen Stretch (20:9 Edge-to-Edge display fill)"
+                                android:textColor="#E6EDF3"
+                                android:textSize="11sp" />
+
+                            <RadioButton
+                                android:id="@+id/rbCropFill"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Smart Zoom &amp; Crop (Uniform fill, no black bars)"
+                                android:textColor="#E6EDF3"
+                                android:textSize="11sp" />
+
+                            <RadioButton
+                                android:id="@+id/rbProductivity"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Productivity 16:10 (Optimized for coding &amp; reading)"
+                                android:textColor="#E6EDF3"
+                                android:textSize="11sp" />
+
+                            <RadioButton
+                                android:id="@+id/rbUltrawide"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Cinematic 21:9 (Ultrawide desktop simulation)"
+                                android:textColor="#E6EDF3"
+                                android:textSize="11sp" />
+                        </RadioGroup>
+                    </LinearLayout>
+
+                </LinearLayout>
+
+                <!-- Right Column: Screen Adjustment, Quality & Game Mode -->
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical"
+                    android:layout_marginStart="8dp">
+
+                    <!-- Option 2: Adjust Mirrored Screen & Gestures -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_dashboard_card"
+                        android:orientation="vertical"
+                        android:padding="16dp"
+                        android:layout_marginBottom="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="2. ADJUST MIRRORED SCREEN"
+                            android:textColor="#FFFFFF"
+                            android:textStyle="bold"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Fixed smooth multi-touch engine (zero jitter/jumping)."
+                            android:textColor="#8B949E"
+                            android:textSize="11sp"
+                            android:layout_marginTop="2dp"
+                            android:layout_marginBottom="8dp" />
+
+                        <TextView
+                            android:id="@+id/viewportStatusText"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Current Scale: 100% | Offset: (0, 0)"
+                            android:textColor="#58A6FF"
+                            android:textSize="11sp"
+                            android:layout_marginBottom="10dp" />
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal">
+
+                            <Button
+                                android:id="@+id/btnResetAdjustment"
+                                android:layout_width="0dp"
+                                android:layout_height="36dp"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_button_secondary"
+                                android:text="Reset View"
+                                android:textColor="#FFFFFF"
+                                android:textSize="11sp"
+                                android:layout_marginEnd="6dp" />
+
+                            <Button
+                                android:id="@+id/btnQuickZoom125"
+                                android:layout_width="0dp"
+                                android:layout_height="36dp"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_button_secondary"
+                                android:text="Zoom +25%"
+                                android:textColor="#FFFFFF"
+                                android:textSize="11sp" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="horizontal"
+                            android:layout_marginTop="6dp">
+
+                            <Button
+                                android:id="@+id/btnSavePresetDashboard"
+                                android:layout_width="0dp"
+                                android:layout_height="36dp"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_button_secondary"
+                                android:text="💾 Save View Preset"
+                                android:textColor="#79C0FF"
+                                android:textSize="11sp"
+                                android:layout_marginEnd="6dp" />
+
+                            <Button
+                                android:id="@+id/btnOpenPresetsDashboard"
+                                android:layout_width="0dp"
+                                android:layout_height="36dp"
+                                android:layout_weight="1"
+                                android:background="@drawable/bg_button_secondary"
+                                android:text="📂 My Presets"
+                                android:textColor="#FFFFFF"
+                                android:textSize="11sp" />
+                        </LinearLayout>
+
+                        <!-- Container for dynamic preset chips in dashboard -->
+                        <LinearLayout
+                            android:id="@+id/layoutSavedPresetsDashboard"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical"
+                            android:layout_marginTop="8dp" />
+                    </LinearLayout>
+
+                    <!-- Option 4: Settings & Adjustments (Resolution & Bitrate) -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_dashboard_card"
+                        android:orientation="vertical"
+                        android:padding="16dp"
+                        android:layout_marginBottom="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="4. RESOLUTION &amp; BITRATE"
+                            android:textColor="#FFFFFF"
+                            android:textStyle="bold"
+                            android:textSize="14sp" />
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Encode parameters dynamically applied in real-time."
+                            android:textColor="#8B949E"
+                            android:textSize="11sp"
+                            android:layout_marginTop="2dp"
+                            android:layout_marginBottom="10dp" />
+
+                        <!-- Resolution buttons row -->
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Resolution:"
+                            android:textColor="#C9D1D9"
+                            android:textSize="11sp"
+                            android:layout_marginBottom="4dp" />
+
+                        <Spinner
+                            android:id="@+id/spinnerResolution"
+                            android:layout_width="match_parent"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_button_secondary"
+                            android:layout_marginBottom="8dp" />
+
+                        <!-- Bitrate buttons row -->
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Quality Bitrate:"
+                            android:textColor="#C9D1D9"
+                            android:textSize="11sp"
+                            android:layout_marginBottom="4dp" />
+
+                        <Spinner
+                            android:id="@+id/spinnerBitrate"
+                            android:layout_width="match_parent"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_button_secondary" />
+                    </LinearLayout>
+
+                    <!-- Option 5: Game Mode (Dummy / Experimental) -->
+                    <LinearLayout
+                        android:id="@+id/cardGameMode"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/bg_dashboard_card"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:padding="14dp"
+                        android:clickable="true"
+                        android:focusable="true">
+
+                        <TextView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:gravity="center"
+                            android:text="🎮"
+                            android:textSize="20sp" />
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical"
+                            android:layout_marginStart="10dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="5. GAME MODE (120Hz Fast Touch)"
+                                android:textColor="#FFD600"
+                                android:textStyle="bold"
+                                android:textSize="12sp" />
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Ultra-polling direct game input engine"
+                                android:textColor="#8B949E"
+                                android:textSize="10sp" />
+                        </LinearLayout>
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:background="#2E2000"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="8dp"
+                            android:paddingTop="3dp"
+                            android:paddingBottom="3dp"
+                            android:text="COMING SOON"
+                            android:textColor="#FFD600"
+                            android:textStyle="bold"
+                            android:textSize="9sp" />
+                    </LinearLayout>
+
+                </LinearLayout>
+
+            </LinearLayout>
+
+        </LinearLayout>
+    </ScrollView>
+
+</FrameLayout>

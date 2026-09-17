@@ -1,0 +1,31 @@
+# Build & Intermediate outputs
+**/build/
+**/.gradle/
+**/local.properties
+**/.cxx/
+**/.idea/
+*.iml
+
+# Native C++ build directories
+windows-native/build/
+windows-native/out/
+mirror/windows-native/build/
+mirror/windows-native/out/
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.exp
+*.lib
+
+# Test captures and logs
+*.log
+phone_*.png
+fullscreen_phone.png
+current_*.png
+safe_fit_phone.png
+*.tmp
+
+# OS files
+Thumbs.db
+.DS_Store
