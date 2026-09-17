@@ -18,6 +18,9 @@ mirror/windows-native/out/
 *.exp
 *.lib
 
+# Cloned reference repos
+keyboard-mouse-virtual-gamepad/
+
 # Test captures and logs
 *.log
 phone_*.png
