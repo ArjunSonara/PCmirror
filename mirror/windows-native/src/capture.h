@@ -16,7 +16,18 @@ public:
     UINT GetWidth() const { return width_; }
     UINT GetHeight() const { return height_; }
 
+    bool CheckAndClearReinitialized() {
+        bool val = wasReinitialized_;
+        wasReinitialized_ = false;
+        return val;
+    }
+
+    void SetCursorVisible(bool visible) { enableCursor_ = visible; }
+    bool IsCursorVisible() const { return enableCursor_; }
+
 private:
+    bool wasReinitialized_ = false;
+    bool enableCursor_ = true;
     void DrawCursor(uint8_t* pFrame, UINT stride, const DXGI_OUTDUPL_FRAME_INFO& frameInfo);
 
     ComPtr<ID3D11Device> device_;

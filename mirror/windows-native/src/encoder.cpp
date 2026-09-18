@@ -5,7 +5,7 @@
 #include <immintrin.h>
 #include <stdio.h>
 
-static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps) {
+static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps) {
     ComPtr<ICodecAPI> codecApi;
     if (SUCCEEDED(encoder->QueryInterface(IID_PPV_ARGS(codecApi.GetAddressOf())))) {
         VARIANT v;
@@ -19,24 +19,63 @@ static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps) {
         v.vt = VT_UI4; v.ulVal = 0;
         codecApi->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &v);
 
-        // 3. Ultra-fast preset (Quality vs Speed = 0, maximum speed and minimum encode latency)
-        v.vt = VT_UI4; v.ulVal = 0;
-        codecApi->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
+        // 3. Balanced preset (33) gives encoder deeper motion estimation during camera swipes without latency penalty
+        v.vt = VT_UI4; v.ulVal = 33;
+        if (FAILED(codecApi->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v))) {
+            v.ulVal = 0;
+            codecApi->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
+        }
 
-        // 4. Constant Bitrate (CBR) for deterministic network packet pacing
-        v.vt = VT_UI4; v.ulVal = eAVEncCommonRateControlMode_CBR;
-        codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
+        // 4. Rate Control: Try Unconstrained VBR (eAVEncCommonRateControlMode_UnconstrainedVBR = 2)
+        // This eliminates bit starvation and heavy quantization blur when swiping the mouse in games.
+        v.vt = VT_UI4; v.ulVal = eAVEncCommonRateControlMode_UnconstrainedVBR;
+        HRESULT hrRc = codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
+        if (FAILED(hrRc)) {
+            // Fallback to Peak-Constrained VBR if unconstrained is rejected
+            v.ulVal = eAVEncCommonRateControlMode_PeakConstrainedVBR;
+            hrRc = codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
+            if (FAILED(hrRc)) {
+                // Final fallback to CBR
+                v.ulVal = eAVEncCommonRateControlMode_CBR;
+                codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
+            }
+        }
 
-        // 5. GOP size (IDR keyframe cadence)
-        v.vt = VT_UI4; v.ulVal = fps * 2;
+        // 5. Target Bitrate & Peak Burst allowance (up to 2.5x target bitrate for sudden motion spikes)
+        v.vt = VT_UI4; v.ulVal = bitrateBps;
+        codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
+
+        UINT peakBps = (UINT)(bitrateBps * 2.5f);
+        if (peakBps > 150000000) peakBps = 150000000;
+        v.ulVal = peakBps;
+        codecApi->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
+
+        // 6. Set VBV buffer window to 250ms worth of bits so sudden motion spikes can draw from buffer
+        v.vt = VT_UI4; v.ulVal = bitrateBps / 4;
+        codecApi->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
+
+        // 7. GOP size (IDR keyframe cadence: 1 keyframe per second for quick recovery)
+        v.vt = VT_UI4; v.ulVal = fps;
         codecApi->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
+
+        // 8. Max QP = 28 to forbid encoder from degrading into pixel blocks during motion spikes
+        v.vt = VT_UI4; v.ulVal = 28;
+        codecApi->SetValue(&CODECAPI_AVEncVideoMaxQP, &v);
+
+        // 9. Min QP = 12 for clean gradients
+        v.vt = VT_UI4; v.ulVal = 12;
+        codecApi->SetValue(&CODECAPI_AVEncVideoMinQP, &v);
+
+        // 10. Enable CABAC entropy coding for 30%+ higher compression efficiency
+        v.vt = VT_BOOL; v.boolVal = VARIANT_TRUE;
+        codecApi->SetValue(&CODECAPI_AVEncH264CABACEnable, &v);
 
         VariantClear(&v);
     }
 }
 
 static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT height, UINT fps, UINT bitrateBps) {
-    // Output type (H.264 Baseline)
+    // Output type (H.264 High Profile with CABAC)
     ComPtr<IMFMediaType> outMediaType;
     HRESULT hr = MFCreateMediaType(outMediaType.GetAddressOf());
     if (FAILED(hr)) return false;
@@ -48,10 +87,23 @@ static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT h
     MFSetAttributeSize(outMediaType.Get(), MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(outMediaType.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(outMediaType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+    outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
 
     hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) {
+        printf("[HwEncoder] SetOutputType High Profile returned 0x%08x, trying Main...\n", hr);
+        outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+        hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
+        if (FAILED(hr)) {
+            printf("[HwEncoder] SetOutputType Main Profile returned 0x%08x, trying Base...\n", hr);
+            outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+            hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
+            if (FAILED(hr)) {
+                printf("[HwEncoder] SetOutputType Base Profile failed: 0x%08x\n", hr);
+                return false;
+            }
+        }
+    }
 
     // Input type (NV12)
     ComPtr<IMFMediaType> inMediaType;
@@ -66,7 +118,11 @@ static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT h
     MFSetAttributeRatio(inMediaType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
 
     hr = encoder->SetInputType(0, inMediaType.Get(), 0);
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        printf("[HwEncoder] SetInputType NV12 failed: 0x%08x\n", hr);
+        return false;
+    }
+    return true;
 }
 
 static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& outIsAsync, UINT width, UINT height, UINT fps, UINT bitrateBps) {
@@ -103,8 +159,8 @@ static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& out
                 }
 
                 // CRITICAL: Configure low latency CodecAPI BEFORE media type negotiation
-                // so the internal encoder pipeline buffers are initialized with 0 lookahead delay!
-                ConfigureCodecAPI(candidate.Get(), fps);
+                // so internal hardware buffers are initialized with 0 lookahead delay!
+                ConfigureCodecAPI(candidate.Get(), fps, bitrateBps);
 
                 if (ConfigureEncoderMediaTypes(candidate.Get(), width, height, fps, bitrateBps)) {
                     wprintf(L"Selected Zero-Latency Encoder: %s (Async=%u)\n", name, isAsync);
@@ -157,8 +213,8 @@ bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps) {
         inSample_->AddBuffer(inBuffer_.Get());
     }
 
-    // Pre-allocate reusable output sample & buffer
-    DWORD outBufSize = streamInfo_.cbSize > 0 ? streamInfo_.cbSize : (1024 * 1024);
+    // Pre-allocate reusable output sample & buffer (4MB to support 250 Mbps IDR bursts)
+    DWORD outBufSize = (streamInfo_.cbSize > 4 * 1024 * 1024) ? streamInfo_.cbSize : (4 * 1024 * 1024);
     hr = MFCreateMemoryBuffer(outBufSize, outBufferHolder_.GetAddressOf());
     if (SUCCEEDED(hr)) {
         MFCreateSample(outSampleHolder_.GetAddressOf());
@@ -191,14 +247,33 @@ void HwEncoder::SetBitrate(UINT bitrateBps) {
         v.vt = VT_UI4;
         v.ulVal = bitrateBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
+
+        // Allow peak burst up to 2.5x target bitrate during motion spikes
+        UINT peakBps = (UINT)(bitrateBps * 2.5f);
+        if (peakBps > 150000000) peakBps = 150000000;
+        v.ulVal = peakBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
+
+        // Update buffer size
+        v.ulVal = bitrateBps / 4;
+        codecApi->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
+
         RequestKeyframe();
-        printf("[HwEncoder] Bitrate updated dynamically to %u bps (%.1f Mbps)\n", bitrateBps, bitrateBps / 1000000.0f);
+        printf("[HwEncoder] Bitrate updated dynamically to %u bps (%.1f Mbps, peak: %.1f Mbps)\n",
+               bitrateBps, bitrateBps / 1000000.0f, peakBps / 1000000.0f);
+        fflush(stdout);
         VariantClear(&v);
     }
 }
 
-// Mathematically exact BT.601 integer BGRA -> NV12 color converter with multi-threaded parallel execution
+void HwEncoder::SetFps(UINT fps) {
+    if (fps >= 30 && fps <= 144) {
+        fps_ = fps;
+        printf("[HwEncoder] Target frame rate set to %u FPS\n", fps_);
+    }
+}
+
+// Mathematically exact ITU-R BT.709 integer BGRA -> NV12 color converter with multi-threaded parallel execution
 void HwEncoder::ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dstNv12) {
     uint8_t* yPlane = dstNv12;
     uint8_t* uvPlane = dstNv12 + (size_t)width_ * height_;
@@ -206,6 +281,7 @@ void HwEncoder::ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dst
     #pragma omp parallel for schedule(static)
     for (int y = 0; y < (int)height_; y++) {
         const uint8_t* srcRow = bgra + (size_t)y * stride;
+        const uint8_t* srcRowNext = (y + 1 < (int)height_) ? (bgra + (size_t)(y + 1) * stride) : srcRow;
         uint8_t* dstY = yPlane + (size_t)y * width_;
         uint8_t* dstUV = uvPlane + ((size_t)y / 2) * width_;
         bool doUV = (y % 2 == 0);
@@ -221,18 +297,31 @@ void HwEncoder::ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dst
                 int g1 = srcRow[(x + 1) * 4 + 1];
                 int r1 = srcRow[(x + 1) * 4 + 2];
 
-                int y0 = ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8) + 16;
-                int y1 = ((66 * r1 + 129 * g1 + 25 * b1 + 128) >> 8) + 16;
+                // Exact ITU-R BT.709 limited-range Y: 16 + (47*R + 157*G + 16*B + 128) >> 8
+                int y0 = ((47 * r0 + 157 * g0 + 16 * b0 + 128) >> 8) + 16;
+                int y1 = ((47 * r1 + 157 * g1 + 16 * b1 + 128) >> 8) + 16;
                 dstY[x]     = (uint8_t)(y0 < 0 ? 0 : (y0 > 255 ? 255 : y0));
                 dstY[x + 1] = (uint8_t)(y1 < 0 ? 0 : (y1 > 255 ? 255 : y1));
 
-                // 2-pixel horizontal box-filter for smooth chroma
-                int rAvg = (r0 + r1) >> 1;
-                int gAvg = (g0 + g1) >> 1;
-                int bAvg = (b0 + b1) >> 1;
+                // 2x2 area box-filter (4-pixel average across rows y and y+1):
+                // Eliminates vertical color aliasing and temporary saturation shifts during fast 3D rotation!
+                int b0_n = srcRowNext[x * 4 + 0];
+                int g0_n = srcRowNext[x * 4 + 1];
+                int r0_n = srcRowNext[x * 4 + 2];
 
-                int uVal = ((-38 * rAvg - 74 * gAvg + 112 * bAvg + 128) >> 8) + 128;
-                int vVal = ((112 * rAvg - 94 * gAvg - 18 * bAvg + 128) >> 8) + 128;
+                int b1_n = srcRowNext[(x + 1) * 4 + 0];
+                int g1_n = srcRowNext[(x + 1) * 4 + 1];
+                int r1_n = srcRowNext[(x + 1) * 4 + 2];
+
+                int rAvg = (r0 + r1 + r0_n + r1_n + 2) >> 2;
+                int gAvg = (g0 + g1 + g0_n + g1_n + 2) >> 2;
+                int bAvg = (b0 + b1 + b0_n + b1_n + 2) >> 2;
+
+                // Exact ITU-R BT.709 limited-range Cb/Cr:
+                // Cb: 128 + (-26*R - 87*G + 112*B + 128) >> 8
+                // Cr: 128 + (112*R - 102*G - 10*B + 128) >> 8
+                int uVal = ((-26 * rAvg - 87 * gAvg + 112 * bAvg + 128) >> 8) + 128;
+                int vVal = ((112 * rAvg - 102 * gAvg - 10 * bAvg + 128) >> 8) + 128;
                 dstUV[x]     = (uint8_t)(uVal < 0 ? 0 : (uVal > 255 ? 255 : uVal));
                 dstUV[x + 1] = (uint8_t)(vVal < 0 ? 0 : (vVal > 255 ? 255 : vVal));
             }
@@ -241,7 +330,7 @@ void HwEncoder::ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dst
                 int b = srcRow[x * 4 + 0];
                 int g = srcRow[x * 4 + 1];
                 int r = srcRow[x * 4 + 2];
-                int yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+                int yVal = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
                 dstY[x] = (uint8_t)(yVal < 0 ? 0 : (yVal > 255 ? 255 : yVal));
             }
         }
@@ -251,11 +340,19 @@ void HwEncoder::ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dst
             int b = srcRow[x * 4 + 0];
             int g = srcRow[x * 4 + 1];
             int r = srcRow[x * 4 + 2];
-            int yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
+            int yVal = ((47 * r + 157 * g + 16 * b + 128) >> 8) + 16;
             dstY[x] = (uint8_t)(yVal < 0 ? 0 : (yVal > 255 ? 255 : yVal));
             if (doUV && (x % 2 == 0)) {
-                int uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                int vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                int b_n = srcRowNext[x * 4 + 0];
+                int g_n = srcRowNext[x * 4 + 1];
+                int r_n = srcRowNext[x * 4 + 2];
+
+                int rAvg = (r + r_n + 1) >> 1;
+                int gAvg = (g + g_n + 1) >> 1;
+                int bAvg = (b + b_n + 1) >> 1;
+
+                int uVal = ((-26 * rAvg - 87 * gAvg + 112 * bAvg + 128) >> 8) + 128;
+                int vVal = ((112 * rAvg - 102 * gAvg - 10 * bAvg + 128) >> 8) + 128;
                 dstUV[x]     = (uint8_t)(uVal < 0 ? 0 : (uVal > 255 ? 255 : uVal));
                 dstUV[x + 1] = (uint8_t)(vVal < 0 ? 0 : (vVal > 255 ? 255 : vVal));
             }

@@ -16,6 +16,7 @@ public:
     void EncodeFrame(const std::vector<uint8_t>& bgra, UINT stride);
     void RequestKeyframe();
     void SetBitrate(UINT bitrateBps);
+    void SetFps(UINT fps);
     void Shutdown();
 
     std::function<void(const uint8_t* data, size_t len)> OnNal;

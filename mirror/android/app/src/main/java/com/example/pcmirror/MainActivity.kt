@@ -7,6 +7,7 @@ import android.media.MediaCodec
 import android.media.MediaFormat
 import android.os.Build
 import android.os.Bundle
+import android.os.StrictMode
 import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
@@ -44,6 +45,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 
 data class CustomAspectPreset(
@@ -100,17 +102,25 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnQuickZoom125: Button
     private lateinit var spinnerResolution: Spinner
     private lateinit var spinnerBitrate: Spinner
+    private lateinit var spinnerFps: Spinner
     private lateinit var cardGameMode: LinearLayout
 
     // Floating in-stream controls
     private lateinit var ratioToggleBtn: Button
     private lateinit var resToggleBtn: Button
     private lateinit var bitrateToggleBtn: Button
+    private lateinit var fpsToggleBtn: Button
     private lateinit var lockScreenBtn: Button
     private lateinit var resetViewBtn: Button
     private lateinit var savePresetBtn: Button
     private lateinit var presetsMenuBtn: Button
     private lateinit var exitStreamBtn: Button
+    private lateinit var touchToggleBtn: Button
+    private lateinit var cursorToggleBtn: Button
+    private lateinit var checkEnableTouch: CheckBox
+    private lateinit var checkShowCursor: CheckBox
+    private var isTouchEnabled = true
+    private var isCursorVisible = true
     private var isViewportLocked = false
 
     // Dashboard preset controls
@@ -151,7 +161,9 @@ class MainActivity : AppCompatActivity() {
     private var readerThread: Thread? = null
     @Volatile private var running = false
     @Volatile private var surfaceReady = false
+    @Volatile private var touchSocket: Socket? = null
     @Volatile private var touchOut: OutputStream? = null
+    private val controlExecutor = Executors.newSingleThreadExecutor()
     private var hasExitedToDashboardManually = false
 
     // Resolution and Bitrate lists
@@ -165,17 +177,31 @@ class MainActivity : AppCompatActivity() {
     private var currentResIndex = 0
 
     private val bitrateOptions = listOf(
-        Pair(8000000f, "8 Mbps (Balanced Default)"),
-        Pair(50000000f, "50 Mbps (Extreme / Lossless)"),
-        Pair(30000000f, "30 Mbps (Ultra Quality)"),
+        Pair(40000000f, "40 Mbps (Crisp Default)"),
+        Pair(60000000f, "60 Mbps (Extreme Motion)"),
+        Pair(80000000f, "80 Mbps (Near-Lossless)"),
+        Pair(100000000f, "100 Mbps (Master Quality)"),
+        Pair(120000000f, "120 Mbps (Ultra-Extreme)"),
+        Pair(150000000f, "150 Mbps (Hyper-Speed)"),
+        Pair(200000000f, "200 Mbps (Max USB Limit)"),
+        Pair(250000000f, "250 Mbps (Peak Bandwidth)"),
         Pair(20000000f, "20 Mbps (High Quality)"),
-        Pair(15000000f, "15 Mbps (Clear)"),
-        Pair(4000000f, "4 Mbps (Ultra Performance)")
+        Pair(10000000f, "10 Mbps (Lightweight)")
     )
     private var currentBitrateIndex = 0
 
+    private val fpsOptions = listOf(
+        Pair(120, "120 FPS (Ultra Smooth Gaming)"),
+        Pair(90, "90 FPS (High Refresh)"),
+        Pair(60, "60 FPS (Balanced)")
+    )
+    private var currentFpsIndex = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        try {
+            StrictMode.setThreadPolicy(StrictMode.ThreadPolicy.Builder().permitAll().build())
+        } catch (_: Exception) {}
 
         // Extend behind notch
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
@@ -241,11 +267,13 @@ class MainActivity : AppCompatActivity() {
 
         spinnerResolution = findViewById(R.id.spinnerResolution)
         spinnerBitrate = findViewById(R.id.spinnerBitrate)
+        spinnerFps = findViewById(R.id.spinnerFps)
         cardGameMode = findViewById(R.id.cardGameMode)
 
         ratioToggleBtn = findViewById(R.id.ratioToggleBtn)
         resToggleBtn = findViewById(R.id.resToggleBtn)
         bitrateToggleBtn = findViewById(R.id.bitrateToggleBtn)
+        fpsToggleBtn = findViewById(R.id.fpsToggleBtn)
         lockScreenBtn = findViewById(R.id.lockScreenBtn)
         resetViewBtn = findViewById(R.id.resetViewBtn)
         savePresetBtn = findViewById(R.id.savePresetBtn)
@@ -257,6 +285,10 @@ class MainActivity : AppCompatActivity() {
         btnSavePresetDashboard = findViewById(R.id.btnSavePresetDashboard)
         btnOpenPresetsDashboard = findViewById(R.id.btnOpenPresetsDashboard)
         layoutSavedPresetsDashboard = findViewById(R.id.layoutSavedPresetsDashboard)
+        touchToggleBtn = findViewById(R.id.touchToggleBtn)
+        cursorToggleBtn = findViewById(R.id.cursorToggleBtn)
+        checkEnableTouch = findViewById(R.id.checkEnableTouch)
+        checkShowCursor = findViewById(R.id.checkShowCursor)
 
         gearMenuBtn.setOnClickListener {
             if (floatingControlsPanel.visibility == View.VISIBLE) {
@@ -335,10 +367,20 @@ class MainActivity : AppCompatActivity() {
         bitrateToggleBtn.setOnClickListener {
             currentBitrateIndex = (currentBitrateIndex + 1) % bitrateOptions.size
             val selected = bitrateOptions[currentBitrateIndex]
-            bitrateToggleBtn.text = "Quality: ${selected.second.substringBefore(" ")}"
+            val mbps = (selected.first / 1000000).toInt()
+            bitrateToggleBtn.text = "Quality: ${mbps}M"
             spinnerBitrate.setSelection(currentBitrateIndex)
             sendControlPacket(10.toByte(), selected.first, 0.0f)
             Toast.makeText(this, "Bitrate: ${selected.second}", Toast.LENGTH_SHORT).show()
+        }
+
+        fpsToggleBtn.setOnClickListener {
+            currentFpsIndex = (currentFpsIndex + 1) % fpsOptions.size
+            val selected = fpsOptions[currentFpsIndex]
+            fpsToggleBtn.text = "FPS: ${selected.first}"
+            spinnerFps.setSelection(currentFpsIndex)
+            sendControlPacket(13.toByte(), selected.first.toFloat(), 0.0f)
+            Toast.makeText(this, "Frame Rate: ${selected.second}", Toast.LENGTH_SHORT).show()
         }
 
         lockScreenBtn.setOnClickListener {
@@ -351,6 +393,44 @@ class MainActivity : AppCompatActivity() {
                 lockScreenBtn.text = "Lock: OFF"
                 lockScreenBtn.setBackgroundResource(R.drawable.bg_button_secondary)
                 Toast.makeText(this, "Screen Unlocked: 2-finger zoom/pan enabled", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        touchToggleBtn.setOnClickListener {
+            isTouchEnabled = !isTouchEnabled
+            checkEnableTouch.isChecked = isTouchEnabled
+            updateTouchBtnUi()
+            saveViewportPrefs()
+            Toast.makeText(this, if (isTouchEnabled) "Touch: ON (Mouse Active)" else "Touch: OFF (View Only)", Toast.LENGTH_SHORT).show()
+        }
+
+        cursorToggleBtn.setOnClickListener {
+            isCursorVisible = !isCursorVisible
+            checkShowCursor.isChecked = isCursorVisible
+            updateCursorBtnUi()
+            saveViewportPrefs()
+            if (running) {
+                sendControlPacket(14.toByte(), if (isCursorVisible) 1.0f else 0.0f, 0.0f)
+            }
+            Toast.makeText(this, if (isCursorVisible) "Cursor: Shown" else "Cursor: Hidden", Toast.LENGTH_SHORT).show()
+        }
+
+        checkEnableTouch.setOnCheckedChangeListener { _, isChecked ->
+            if (isTouchEnabled != isChecked) {
+                isTouchEnabled = isChecked
+                updateTouchBtnUi()
+                saveViewportPrefs()
+            }
+        }
+
+        checkShowCursor.setOnCheckedChangeListener { _, isChecked ->
+            if (isCursorVisible != isChecked) {
+                isCursorVisible = isChecked
+                updateCursorBtnUi()
+                saveViewportPrefs()
+                if (running) {
+                    sendControlPacket(14.toByte(), if (isCursorVisible) 1.0f else 0.0f, 0.0f)
+                }
             }
         }
 
@@ -441,9 +521,27 @@ class MainActivity : AppCompatActivity() {
                 if (position != currentBitrateIndex) {
                     currentBitrateIndex = position
                     val opt = bitrateOptions[position]
-                    bitrateToggleBtn.text = "Quality: ${opt.second.substringBefore(" ")}"
+                    val mbps = (opt.first / 1000000).toInt()
+                    bitrateToggleBtn.text = "Quality: ${mbps}M"
                     if (running) {
                         sendControlPacket(10.toByte(), opt.first, 0.0f)
+                    }
+                }
+            }
+            override fun onNothingSelected(p0: android.widget.AdapterView<*>?) {}
+        }
+
+        val fpsNames = fpsOptions.map { it.second }
+        val fpsAdapter = ArrayAdapter(this, R.layout.item_spinner, R.id.spinnerText, fpsNames)
+        spinnerFps.adapter = fpsAdapter
+        spinnerFps.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(p0: android.widget.AdapterView<*>?, p1: View?, position: Int, p3: Long) {
+                if (position != currentFpsIndex) {
+                    currentFpsIndex = position
+                    val opt = fpsOptions[position]
+                    fpsToggleBtn.text = "FPS: ${opt.first}"
+                    if (running) {
+                        sendControlPacket(13.toByte(), opt.first.toFloat(), 0.0f)
                     }
                 }
             }
@@ -567,6 +665,30 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "View Reset", Toast.LENGTH_SHORT).show()
     }
 
+    private fun updateTouchBtnUi() {
+        if (isTouchEnabled) {
+            touchToggleBtn.text = "Touch: ON"
+            touchToggleBtn.setTextColor(android.graphics.Color.parseColor("#E6EDF3"))
+            touchToggleBtn.setBackgroundResource(R.drawable.bg_button_secondary)
+        } else {
+            touchToggleBtn.text = "Touch: OFF"
+            touchToggleBtn.setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+            touchToggleBtn.setBackgroundResource(R.drawable.bg_button_locked)
+        }
+    }
+
+    private fun updateCursorBtnUi() {
+        if (isCursorVisible) {
+            cursorToggleBtn.text = "Cursor: ON"
+            cursorToggleBtn.setTextColor(android.graphics.Color.parseColor("#E6EDF3"))
+            cursorToggleBtn.setBackgroundResource(R.drawable.bg_button_secondary)
+        } else {
+            cursorToggleBtn.text = "Cursor: OFF"
+            cursorToggleBtn.setTextColor(android.graphics.Color.parseColor("#FF8A80"))
+            cursorToggleBtn.setBackgroundResource(R.drawable.bg_button_locked)
+        }
+    }
+
     private fun saveViewportPrefs() {
         getSharedPreferences("pcmirror_prefs", MODE_PRIVATE).edit()
             .putFloat("scale_x", vScaleX)
@@ -575,6 +697,8 @@ class MainActivity : AppCompatActivity() {
             .putFloat("trans_y", vTransY)
             .putString("aspect_mode", currentAspectMode.name)
             .putBoolean("auto_connect", autoConnectCheck.isChecked)
+            .putBoolean("enable_touch", isTouchEnabled)
+            .putBoolean("show_cursor", isCursorVisible)
             .apply()
     }
 
@@ -588,6 +712,12 @@ class MainActivity : AppCompatActivity() {
         currentAspectMode = try { AspectRatioMode.valueOf(modeStr ?: "") } catch (_: Exception) { AspectRatioMode.SAFE_FIT }
         updateRatioRadioSelection(currentAspectMode)
         autoConnectCheck.isChecked = prefs.getBoolean("auto_connect", true)
+        isTouchEnabled = prefs.getBoolean("enable_touch", true)
+        isCursorVisible = prefs.getBoolean("show_cursor", true)
+        checkEnableTouch.isChecked = isTouchEnabled
+        checkShowCursor.isChecked = isCursorVisible
+        updateTouchBtnUi()
+        updateCursorBtnUi()
         applyViewportTransform()
         updateViewportStatus()
         updateDashboardPresetsView()
@@ -846,8 +976,17 @@ class MainActivity : AppCompatActivity() {
         Thread {
             try {
                 val s = Socket(ip, PORT + 1).apply { tcpNoDelay = true }
+                touchSocket = s
                 touchOut = s.getOutputStream()
                 Log.i(TAG, "Touch backchannel connected to $ip:${PORT + 1}")
+                // Send initial configuration: Bitrate, Resolution, and FPS
+                val currentBitrate = bitrateOptions[currentBitrateIndex].first
+                val currentRes = resOptions[currentResIndex].first
+                val currentFps = fpsOptions[currentFpsIndex].first
+                sendControlPacket(10.toByte(), currentBitrate, 0.0f)
+                sendControlPacket(11.toByte(), currentRes.first.toFloat(), currentRes.second.toFloat())
+                sendControlPacket(13.toByte(), currentFps.toFloat(), 0.0f)
+                sendControlPacket(14.toByte(), if (isCursorVisible) 1.0f else 0.0f, 0.0f)
             } catch (e: Exception) {
                 Log.w(TAG, "Touch backchannel optional: ${e.message}")
             }
@@ -956,6 +1095,10 @@ class MainActivity : AppCompatActivity() {
             }
 
             // 4. Forward single-touch to PC mouse
+            if (!isTouchEnabled) {
+                return@setOnTouchListener true
+            }
+
             val out = touchOut ?: return@setOnTouchListener false
             val action = when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> 0.toByte()
@@ -1079,6 +1222,8 @@ class MainActivity : AppCompatActivity() {
         activeCodec = null
         try { touchOut?.close() } catch (_: Exception) {}
         touchOut = null
+        try { touchSocket?.close() } catch (_: Exception) {}
+        touchSocket = null
         try { audioSocket?.close() } catch (_: Exception) {}
         audioSocket = null
         try { audioTrack?.stop(); audioTrack?.release() } catch (_: Exception) {}
@@ -1093,10 +1238,16 @@ class MainActivity : AppCompatActivity() {
         buf.put(type)
         buf.putFloat(p1)
         buf.putFloat(p2)
-        try {
-            out.write(buf.array())
-            out.flush()
-        } catch (_: Exception) {}
+        val data = buf.array().clone()
+        controlExecutor.execute {
+            try {
+                out.write(data)
+                out.flush()
+                Log.d(TAG, "sendControlPacket sent: type=$type, p1=$p1, p2=$p2")
+            } catch (e: Exception) {
+                Log.e(TAG, "sendControlPacket failed: ${e.message}")
+            }
+        }
     }
 
     private fun hideSystemUI() {
@@ -1210,7 +1361,7 @@ class MainActivity : AppCompatActivity() {
             }
 
             val dataIn = DataInputStream(socket.getInputStream())
-            val packetBuf = ByteArray(2 * 1024 * 1024)
+            val packetBuf = ByteArray(4 * 1024 * 1024)
 
             var sps: ByteArray? = null
             var pps: ByteArray? = null
@@ -1253,6 +1404,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
                 setInteger(MediaFormat.KEY_OPERATING_RATE, 240)
+                setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+                setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
                 try {
                     setInteger(MediaFormat.KEY_ALLOW_FRAME_DROP, 0)
                     setInteger("vendor.low-latency.enable", 1)

@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
     UINT customWidth = argc > 2 ? atoi(argv[2]) : 0;
     UINT customHeight = argc > 3 ? atoi(argv[3]) : 0;
     UINT fps = argc > 4 ? atoi(argv[4]) : 60;
-    UINT bitrate = argc > 5 ? atoi(argv[5]) : 8000000;
+    UINT bitrate = argc > 5 ? atoi(argv[5]) : 40000000;
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     timeBeginPeriod(1);
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
 
     UINT streamWidth = customWidth ? customWidth : capture.GetWidth();
     UINT streamHeight = customHeight ? customHeight : capture.GetHeight();
-    printf("Target video resolution: %ux%u @ %u fps (%u bps)\n", streamWidth, streamHeight, fps, bitrate);
+    printf("Target video resolution: %ux%u @ %u fps (%.1f Mbps)\n", streamWidth, streamHeight, fps, bitrate / 1000000.0f);
 
     InputServer inputServer;
     inputServer.Start(port + 1);
@@ -146,6 +146,21 @@ int main(int argc, char** argv) {
             encoder.RequestKeyframe();
         };
 
+        double targetFrameInterval = 1.0 / fps;
+
+        inputServer.OnFpsChange = [&](uint32_t newFps) {
+            if (newFps >= 30 && newFps <= 144) {
+                fps = newFps;
+                encoder.SetFps(newFps);
+                targetFrameInterval = 1.0 / (double)fps;
+                printf("[PC Mirror] Dynamic Frame Rate switched to %u FPS (target interval: %.2f ms)\n", fps, targetFrameInterval * 1000.0);
+            }
+        };
+
+        inputServer.OnCursorToggle = [&](bool visible) {
+            capture.SetCursorVisible(visible);
+        };
+
         std::atomic<bool> clientActive{ true };
         size_t totalBytesSent = 0;
         size_t frameCount = 0;
@@ -170,7 +185,6 @@ int main(int argc, char** argv) {
         QueryPerformanceCounter(&lastReport);
         QueryPerformanceCounter(&lastFrameTime);
 
-        double targetFrameInterval = 1.0 / fps;
         double lastFrameSec = 0;
 
         // Force DWM to produce an initial desktop frame immediately upon connection
@@ -212,13 +226,18 @@ int main(int argc, char** argv) {
 
             // DXGI blocks efficiently until DWM presents a new frame, up to 16ms
             if (capture.GrabFrame(bgra, w, h, stride, 16)) {
+                if (capture.CheckAndClearReinitialized()) {
+                    printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
+                    encoder.RequestKeyframe();
+                }
                 QueryPerformanceCounter(&tCap1);
                 QueryPerformanceCounter(&now);
                 double currentSec = (double)now.QuadPart / (double)freq.QuadPart;
                 double delta = currentSec - lastFrameSec;
 
-                // Pace to target FPS (e.g. 60 FPS on a 144Hz screen)
-                if (delta >= (targetFrameInterval - 0.003)) {
+                // Pace to target FPS (e.g. 60, 90, 120 FPS on a 144Hz screen)
+                double leadMargin = targetFrameInterval > 0.010 ? 0.003 : 0.0015;
+                if (delta >= (targetFrameInterval - leadMargin)) {
                     LARGE_INTEGER tEnc0, tEnc1;
                     QueryPerformanceCounter(&tEnc0);
 

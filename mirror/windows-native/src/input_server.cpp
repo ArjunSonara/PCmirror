@@ -89,8 +89,9 @@ void InputServer::Run(int port) {
 
             // Command 10: Dynamic Bitrate Change
             if (pkt.type == 10) {
-                uint32_t bps = (uint32_t)(pkt.p1 * 1000000.0f);
-                printf("[InputServer] Received bitrate change request: %.1f Mbps (%u bps)\n", pkt.p1, bps);
+                uint32_t bps = (pkt.p1 > 10000.0f) ? (uint32_t)pkt.p1 : (uint32_t)(pkt.p1 * 1000000.0f);
+                printf("[InputServer] Received bitrate change request: %.1f Mbps (%u bps)\n", bps / 1000000.0f, bps);
+                fflush(stdout);
                 if (OnBitrateChange) OnBitrateChange(bps);
                 continue;
             }
@@ -100,6 +101,7 @@ void InputServer::Run(int port) {
                 uint32_t w = (uint32_t)pkt.p1;
                 uint32_t h = (uint32_t)pkt.p2;
                 printf("[InputServer] Received resolution change request: %ux%u\n", w, h);
+                fflush(stdout);
                 if (OnResolutionChange) OnResolutionChange(w, h);
                 continue;
             }
@@ -107,7 +109,26 @@ void InputServer::Run(int port) {
             // Command 12: Force IDR Keyframe Request
             if (pkt.type == 12) {
                 printf("[InputServer] Received IDR keyframe request\n");
+                fflush(stdout);
                 if (OnKeyframeRequest) OnKeyframeRequest();
+                continue;
+            }
+
+            // Command 13: Dynamic Frame Rate (FPS) Change
+            if (pkt.type == 13) {
+                uint32_t reqFps = (uint32_t)pkt.p1;
+                printf("[InputServer] Received FPS change request: %u FPS\n", reqFps);
+                fflush(stdout);
+                if (OnFpsChange) OnFpsChange(reqFps);
+                continue;
+            }
+
+            // Command 14: Dynamic Cursor Visibility Toggle (1.0f = Visible, 0.0f = Hidden)
+            if (pkt.type == 14) {
+                bool visible = (pkt.p1 > 0.5f);
+                printf("[InputServer] Received cursor visibility toggle: %s\n", visible ? "VISIBLE" : "HIDDEN");
+                fflush(stdout);
+                if (OnCursorToggle) OnCursorToggle(visible);
                 continue;
             }
 

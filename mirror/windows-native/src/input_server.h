@@ -17,6 +17,8 @@ public:
     std::function<void(uint32_t bitrateBps)> OnBitrateChange;
     std::function<void(uint32_t width, uint32_t height)> OnResolutionChange;
     std::function<void()> OnKeyframeRequest;
+    std::function<void(uint32_t fps)> OnFpsChange;
+    std::function<void(bool visible)> OnCursorToggle;
 
 private:
     void Run(int port);

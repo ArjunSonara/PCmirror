@@ -12,6 +12,7 @@ bool DesktopCapture::Init(UINT outputIndex) {
     HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
     if (hDesk) {
         SetThreadDesktop(hDesk);
+        CloseDesktop(hDesk);
     }
 
     ComPtr<IDXGIFactory1> factory;
@@ -60,7 +61,8 @@ bool DesktopCapture::Init(UINT outputIndex) {
     }
 
     if (!found) {
-        printf("No active desktop output found for index %u.\n", outputIndex);
+        device_.Reset();
+        context_.Reset();
         return false;
     }
 
@@ -255,7 +257,21 @@ void DesktopCapture::DrawCursor(uint8_t* pFrame, UINT stride, const DXGI_OUTDUPL
 }
 
 bool DesktopCapture::GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UINT& outHeight, UINT& outStride, UINT timeoutMs) {
-    if (!duplication_) return false;
+    if (!duplication_) {
+        static DWORD lastRetryTick = 0;
+        DWORD nowTick = GetTickCount();
+        if (nowTick - lastRetryTick < 250) {
+            Sleep(10);
+            return false;
+        }
+        lastRetryTick = nowTick;
+        printf("[DesktopCapture] Re-initializing capture after game/display mode change...\n");
+        if (!Init(outputIndex_)) {
+            return false;
+        }
+        wasReinitialized_ = true;
+        printf("[DesktopCapture] Successfully re-hooked desktop capture for game!\n");
+    }
 
     ComPtr<IDXGIResource> desktopResource;
     DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
@@ -264,14 +280,12 @@ bool DesktopCapture::GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UI
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
         return false;
     }
-    if (hr == DXGI_ERROR_ACCESS_LOST) {
-        printf("DXGI_ERROR_ACCESS_LOST -- re-initializing capture...\n");
-        Shutdown();
-        Init(outputIndex_);
-        return false;
-    }
     if (FAILED(hr)) {
-        printf("AcquireNextFrame failed: 0x%08x\n", hr);
+        // Any failure (DXGI_ERROR_ACCESS_LOST 0x887a0026, DXGI_ERROR_INVALID_CALL 0x887a0001, etc.)
+        // indicates that a game launched, changed resolution/fullscreen mode, or reset the adapter.
+        // We must cleanly shut down and allow the next frame to re-hook.
+        printf("[DesktopCapture] AcquireNextFrame failed (0x%08x) -- resetting for game launch/mode switch...\n", hr);
+        Shutdown();
         return false;
     }
 
@@ -303,8 +317,10 @@ bool DesktopCapture::GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UI
     context_->Unmap(stagingTexture_.Get(), 0);
     duplication_->ReleaseFrame();
 
-    // Composite mouse cursor directly onto the captured frame
-    DrawCursor(outBgra.data(), outStride, frameInfo);
+    // Composite mouse cursor directly onto the captured frame if enabled
+    if (enableCursor_) {
+        DrawCursor(outBgra.data(), outStride, frameInfo);
+    }
 
     return true;
 }

@@ -71,7 +71,20 @@
                 android:textSize="10sp"
                 android:textColor="#E6EDF3"
                 android:background="@drawable/bg_button_secondary"
-                android:text="Quality: 8M"
+                android:text="Quality: 40M"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/fpsToggleBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#00E676"
+                android:textStyle="bold"
+                android:background="@drawable/bg_button_secondary"
+                android:text="FPS: 120"
                 android:layout_marginEnd="4dp" />
 
             <Button
@@ -84,6 +97,30 @@
                 android:textColor="#E6EDF3"
                 android:background="@drawable/bg_button_secondary"
                 android:text="Lock: OFF"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/touchToggleBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Touch: ON"
+                android:layout_marginEnd="4dp" />
+
+            <Button
+                android:id="@+id/cursorToggleBtn"
+                android:layout_width="wrap_content"
+                android:layout_height="32dp"
+                android:paddingStart="9dp"
+                android:paddingEnd="9dp"
+                android:textSize="10sp"
+                android:textColor="#E6EDF3"
+                android:background="@drawable/bg_button_secondary"
+                android:text="Cursor: ON"
                 android:layout_marginEnd="4dp" />
 
             <Button
@@ -287,6 +324,26 @@
                             android:layout_height="wrap_content"
                             android:text="Auto-Connect to PC on App Launch"
                             android:textColor="#79C0FF"
+                            android:textSize="12sp"
+                            android:checked="true"
+                            android:layout_marginBottom="4dp" />
+
+                        <CheckBox
+                            android:id="@+id/checkEnableTouch"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Enable Touch Control (PC Mouse Input)"
+                            android:textColor="#E6EDF3"
+                            android:textSize="12sp"
+                            android:checked="true"
+                            android:layout_marginBottom="4dp" />
+
+                        <CheckBox
+                            android:id="@+id/checkShowCursor"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Show Mouse Cursor on Screen"
+                            android:textColor="#E6EDF3"
                             android:textSize="12sp"
                             android:checked="true"
                             android:layout_marginBottom="10dp" />
@@ -538,6 +595,22 @@
 
                         <Spinner
                             android:id="@+id/spinnerBitrate"
+                            android:layout_width="match_parent"
+                            android:layout_height="36dp"
+                            android:background="@drawable/bg_button_secondary"
+                            android:layout_marginBottom="8dp" />
+
+                        <!-- Frame Rate (FPS) row -->
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Refresh Rate / FPS (Ultra Smooth):"
+                            android:textColor="#C9D1D9"
+                            android:textSize="11sp"
+                            android:layout_marginBottom="4dp" />
+
+                        <Spinner
+                            android:id="@+id/spinnerFps"
                             android:layout_width="match_parent"
                             android:layout_height="36dp"
                             android:background="@drawable/bg_button_secondary" />

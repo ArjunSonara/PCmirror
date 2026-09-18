@@ -46,7 +46,7 @@ PCMirror provides high-performance desktop mirroring designed for gaming, produc
 ### 2. Run Windows Server
 Launch `PCMirror.exe` on your PC:
 ```powershell
-.\PCMirror.exe 8080 1920 1080 60 8000000
+.\PCMirror.exe 8080 1920 1080 60 40000000
 ```
 *(Arguments: `<port> <width> <height> <fps> <bitrate>`)*
 
