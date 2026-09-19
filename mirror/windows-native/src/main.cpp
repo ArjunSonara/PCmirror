@@ -143,9 +143,12 @@ int main(int argc, char** argv) {
         UINT reqWidth = streamWidth;
         UINT reqHeight = streamHeight;
 
+        std::atomic<bool> bitrateChangeRequested{ false };
+        std::atomic<uint32_t> reqBitrate{ bitrate };
+
         inputServer.OnBitrateChange = [&](uint32_t newBitrate) {
-            bitrate = newBitrate;
-            encoder.SetBitrate(newBitrate);
+            reqBitrate = newBitrate;
+            bitrateChangeRequested = true;
         };
 
         inputServer.OnResolutionChange = [&](uint32_t w, uint32_t h) {
@@ -209,10 +212,8 @@ int main(int argc, char** argv) {
             if (!clientActive) return;
             {
                 std::lock_guard<std::mutex> lock(queueMutex);
-                if (sendQueue.size() >= 2) {
-                    // Send queue backlogged: clear stale buffered frames and request keyframe immediately
-                    sendQueue.clear();
-                    encoder.RequestKeyframe();
+                if (sendQueue.size() >= 25) {
+                    sendQueue.pop_front();
                 }
                 sendQueue.emplace_back(data, data + len);
             }
@@ -277,6 +278,19 @@ int main(int argc, char** argv) {
                 streamWidth = reqWidth;
                 streamHeight = reqHeight;
                 printf("\n[PC Mirror] Dynamic Resolution Switching to %ux%u...\n", streamWidth, streamHeight);
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex);
+                    sendQueue.clear();
+                }
+                encoder.Shutdown();
+                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight());
+                encoder.RequestKeyframe();
+            }
+
+            if (bitrateChangeRequested) {
+                bitrateChangeRequested = false;
+                bitrate = reqBitrate.load();
+                printf("\n[PC Mirror] Dynamic Bitrate Switching to %u bps (%.1f Mbps)...\n", bitrate, bitrate / 1000000.0f);
                 {
                     std::lock_guard<std::mutex> lock(queueMutex);
                     sendQueue.clear();

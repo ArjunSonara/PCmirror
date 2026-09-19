@@ -461,9 +461,9 @@ void HwEncoder::SetBitrate(UINT bitrateBps) {
         v.ulVal = peakBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
 
-        // Update buffer size
-        v.ulVal = bitrateBps / 4;
-        codecApi->SetValue(&CODECAPI_AVEncCommonBufferSize, &v);
+        // Do NOT change CODECAPI_AVEncCommonBufferSize dynamically during streaming!
+        // AVEncCommonBufferSize is a static HRD parameter; changing it on the fly causes
+        // Intel QuickSync MFT to invalidate stream parameters and stall with MF_E_TRANSFORM_STREAM_CHANGE.
 
         RequestKeyframe();
         printf("[HwEncoder] Bitrate updated dynamically to %u bps (%.1f Mbps, peak: %.1f Mbps)\n",
@@ -623,17 +623,26 @@ void HwEncoder::DrainOutput() {
         DWORD status = 0;
 
         if (!(streamInfo_.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+            if (outBufferHolder_) {
+                outBufferHolder_->SetCurrentLength(0);
+            }
             outBuf.pSample = outSampleHolder_.Get();
         }
 
         HRESULT hr = encoder_->ProcessOutput(0, 1, &outBuf, &status);
         if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
+        if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+            HandleStreamChange();
+            if (outBuf.pEvents) outBuf.pEvents->Release();
+            continue;
+        }
         if (FAILED(hr)) {
             static DWORD lastPrint = 0;
             if (GetTickCount() - lastPrint > 1000) {
                 printf("[HwEncoder] ProcessOutput returned 0x%08x\n", hr);
                 lastPrint = GetTickCount();
             }
+            if (outBuf.pEvents) outBuf.pEvents->Release();
             break;
         }
 
@@ -659,6 +668,26 @@ void HwEncoder::DrainOutput() {
     }
 }
 
+void HwEncoder::HandleStreamChange() {
+    if (!encoder_) return;
+    HRESULT hr = encoder_->GetOutputStreamInfo(0, &streamInfo_);
+    if (FAILED(hr)) return;
+
+    if (!(streamInfo_.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
+        DWORD newSize = (streamInfo_.cbSize > 4 * 1024 * 1024) ? streamInfo_.cbSize : (4 * 1024 * 1024);
+        ComPtr<IMFMediaBuffer> newBuf;
+        if (SUCCEEDED(MFCreateMemoryBuffer(newSize, newBuf.GetAddressOf()))) {
+            outBufferHolder_ = newBuf;
+            outSampleHolder_.Reset();
+            MFCreateSample(outSampleHolder_.GetAddressOf());
+            outSampleHolder_->AddBuffer(outBufferHolder_.Get());
+        }
+    }
+    RequestKeyframe();
+    printf("[HwEncoder] Handled MF_E_TRANSFORM_STREAM_CHANGE successfully (buffer size: %u bytes)\n", streamInfo_.cbSize);
+    fflush(stdout);
+}
+
 void HwEncoder::DrainAsyncOutput() {
     if (!encoder_ || !isStreaming_) return;
 
@@ -680,6 +709,14 @@ void HwEncoder::DrainAsyncOutput() {
     }
 
     HRESULT hr = encoder_->ProcessOutput(0, 1, &outBuf, &status);
+    if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
+        HandleStreamChange();
+        if (outBuf.pEvents) {
+            outBuf.pEvents->Release();
+        }
+        return;
+    }
+
     if (SUCCEEDED(hr) && outBuf.pSample) {
         IMFSample* outSample = outBuf.pSample;
         ComPtr<IMFMediaBuffer> contiguous;

@@ -34,6 +34,7 @@ private:
     void ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dstNv12);
     void DrainOutput();
     void DrainAsyncOutput();
+    void HandleStreamChange();
     friend class EncoderEventCallback;
 
     ComPtr<IMFTransform> encoder_;
