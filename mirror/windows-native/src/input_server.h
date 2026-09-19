@@ -19,6 +19,8 @@ public:
     std::function<void()> OnKeyframeRequest;
     std::function<void(uint32_t fps)> OnFpsChange;
     std::function<void(bool visible)> OnCursorToggle;
+    std::function<void(float scale)> OnCongestionScale;
+    std::function<void(uint32_t codecId)> OnCodecChange;
 
 private:
     void Run(int port);

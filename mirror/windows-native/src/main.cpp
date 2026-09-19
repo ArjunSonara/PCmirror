@@ -73,8 +73,6 @@ int main(int argc, char** argv) {
         printf("=================================================================\n");
         printf("Check your taskbar or existing window.\n");
         printf("If you want to restart it, close the existing PC Mirror first.\n\n");
-        printf("Press Enter to close this window...");
-        getchar();
         return 0;
     }
 
@@ -82,8 +80,6 @@ int main(int argc, char** argv) {
     if (!capture.Init()) {
         printf("\n[ERROR] Failed to initialize Desktop Duplication Capture.\n");
         printf("Please ensure your display driver is running normally.\n");
-        printf("Press Enter to exit...");
-        getchar();
         CoUninitialize();
         if (hMutex) CloseHandle(hMutex);
         return 1;
@@ -102,8 +98,6 @@ int main(int argc, char** argv) {
     NetworkServer server;
     if (!server.Init(port)) {
         printf("\n[ERROR] Failed to start network server on port %d.\n", port);
-        printf("Press Enter to exit...");
-        getchar();
         audioServer.Stop();
         inputServer.Stop();
         capture.Shutdown();
@@ -131,13 +125,18 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        VideoCodec currentCodec = CODEC_HEVC;
+        std::atomic<bool> codecChangeRequested{ false };
+        std::atomic<uint32_t> reqCodec{ (uint32_t)currentCodec };
+
         HwEncoder encoder;
-        if (!encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight())) {
-            printf("[ERROR] Failed to initialize H.264 hardware encoder.\n");
+        if (!encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec)) {
+            printf("[ERROR] Failed to initialize hardware encoder.\n");
             server.DisconnectClient();
             Sleep(1000);
             continue;
         }
+        currentCodec = encoder.GetCodec(); // In case of fallback to H.264
 
         std::atomic<bool> resChangeRequested{ false };
         UINT reqWidth = streamWidth;
@@ -155,6 +154,21 @@ int main(int argc, char** argv) {
             reqWidth = w ? w : capture.GetWidth();
             reqHeight = h ? h : capture.GetHeight();
             resChangeRequested = true;
+        };
+
+        inputServer.OnCodecChange = [&](uint32_t codecId) {
+            reqCodec = codecId;
+            codecChangeRequested = true;
+        };
+
+        inputServer.OnCongestionScale = [&](float scale) {
+            uint32_t target = (uint32_t)(bitrate * scale);
+            if (target < 15000000) target = 15000000;
+            if (target > 200000000) target = 200000000;
+            if (abs((int)target - (int)bitrate) > 4000000) {
+                reqBitrate = target;
+                bitrateChangeRequested = true;
+            }
         };
 
         inputServer.OnKeyframeRequest = [&]() {
@@ -273,6 +287,20 @@ int main(int argc, char** argv) {
         }
 
         while (g_running && clientActive) {
+            if (codecChangeRequested) {
+                codecChangeRequested = false;
+                currentCodec = (reqCodec.load() == 1) ? CODEC_HEVC : CODEC_H264;
+                printf("\n[PC Mirror] Dynamic Codec Switching to %s...\n", currentCodec == CODEC_HEVC ? "HEVC (H.265)" : "H.264 (AVC)");
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex);
+                    sendQueue.clear();
+                }
+                encoder.Shutdown();
+                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
+                currentCodec = encoder.GetCodec();
+                encoder.RequestKeyframe();
+            }
+
             if (resChangeRequested) {
                 resChangeRequested = false;
                 streamWidth = reqWidth;
@@ -283,7 +311,7 @@ int main(int argc, char** argv) {
                     sendQueue.clear();
                 }
                 encoder.Shutdown();
-                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight());
+                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
                 encoder.RequestKeyframe();
             }
 
@@ -296,7 +324,7 @@ int main(int argc, char** argv) {
                     sendQueue.clear();
                 }
                 encoder.Shutdown();
-                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight());
+                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
                 encoder.RequestKeyframe();
             }
 

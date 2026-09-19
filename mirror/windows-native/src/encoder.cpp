@@ -68,7 +68,7 @@ STDMETHODIMP EncoderEventCallback::Invoke(IMFAsyncResult* pResult) {
     return S_OK;
 }
 
-static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps) {
+static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps, VideoCodec codec, UINT sliceCount = 4) {
     ComPtr<ICodecAPI> codecApi;
     if (SUCCEEDED(encoder->QueryInterface(IID_PPV_ARGS(codecApi.GetAddressOf())))) {
         VARIANT v;
@@ -121,41 +121,59 @@ static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps) 
         v.vt = VT_UI4; v.ulVal = 12;
         codecApi->SetValue(&CODECAPI_AVEncVideoMinQP, &v);
 
-        // 10. Enable CABAC entropy coding for 30%+ higher compression efficiency
-        v.vt = VT_BOOL; v.boolVal = VARIANT_TRUE;
-        codecApi->SetValue(&CODECAPI_AVEncH264CABACEnable, &v);
+        // 10. Enable CABAC entropy coding for H.264
+        if (codec == CODEC_H264) {
+            v.vt = VT_BOOL; v.boolVal = VARIANT_TRUE;
+            codecApi->SetValue(&CODECAPI_AVEncH264CABACEnable, &v);
+        }
+
+        // 11. Feature 3: Slice-Based Multi-Threading (sub-frame transmission)
+        if (sliceCount > 1) {
+            v.vt = VT_UI4;
+            v.ulVal = 2; // eAVEncSliceControlMode_NumberOfSlices = 2
+            codecApi->SetValue(&CODECAPI_AVEncSliceControlMode, &v);
+            v.ulVal = sliceCount;
+            codecApi->SetValue(&CODECAPI_AVEncSliceControlSize, &v);
+        }
 
         VariantClear(&v);
     }
 }
 
-static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT height, UINT fps, UINT bitrateBps) {
-    // Output type (H.264 High Profile with CABAC)
+static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT height, UINT fps, UINT bitrateBps, VideoCodec codec) {
     ComPtr<IMFMediaType> outMediaType;
     HRESULT hr = MFCreateMediaType(outMediaType.GetAddressOf());
     if (FAILED(hr)) return false;
 
     outMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    outMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    if (codec == CODEC_HEVC) {
+        outMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_HEVC);
+    } else {
+        outMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+        outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+    }
+
     outMediaType->SetUINT32(MF_MT_AVG_BITRATE, bitrateBps);
     outMediaType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     MFSetAttributeSize(outMediaType.Get(), MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(outMediaType.Get(), MF_MT_FRAME_RATE, fps, 1);
     MFSetAttributeRatio(outMediaType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-    outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
 
     hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
-    if (FAILED(hr)) {
+    if (FAILED(hr) && codec == CODEC_H264) {
         outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
         hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
         if (FAILED(hr)) {
             outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
             hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
             if (FAILED(hr)) {
-                printf("[HwEncoder] SetOutputType Base Profile failed: 0x%08x\n", hr);
+                printf("[HwEncoder] SetOutputType H.264 Base Profile failed: 0x%08x\n", hr);
                 return false;
             }
         }
+    } else if (FAILED(hr)) {
+        printf("[HwEncoder] SetOutputType failed: 0x%08x\n", hr);
+        return false;
     }
 
     // Check available input types from the hardware encoder
@@ -194,17 +212,63 @@ static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT h
     return true;
 }
 
-static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& outIsAsync, UINT width, UINT height, UINT fps, UINT bitrateBps, IMFDXGIDeviceManager* dxgiManager) {
+static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& outIsAsync, VideoCodec& activeCodec, UINT width, UINT height, UINT fps, UINT bitrateBps, IMFDXGIDeviceManager* dxgiManager, VideoCodec requestedCodec, UINT sliceCount) {
     MFT_REGISTER_TYPE_INFO inType = { MFMediaType_Video, MFVideoFormat_NV12 };
-    MFT_REGISTER_TYPE_INFO outType = { MFMediaType_Video, MFVideoFormat_H264 };
 
-    // Search pass 0: Hardware encoders (Intel QuickSync / NVENC / AMD AMF)
-    // Search pass 1: Fallback to all encoders (including Software MFT)
+    // Search pass for requested codec (HEVC prioritizes hardware MFT)
+    if (requestedCodec == CODEC_HEVC) {
+        MFT_REGISTER_TYPE_INFO outTypeHEVC = { MFMediaType_Video, MFVideoFormat_HEVC };
+        IMFActivate** activates = nullptr;
+        UINT32 count = 0;
+        HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER, &inType, &outTypeHEVC, &activates, &count);
+        if (SUCCEEDED(hr) && count > 0) {
+            for (UINT32 i = 0; i < count; i++) {
+                UINT32 isAsync = 0;
+                activates[i]->GetUINT32(MF_TRANSFORM_ASYNC, &isAsync);
+                WCHAR name[256] = {};
+                activates[i]->GetString(MFT_FRIENDLY_NAME_Attribute, name, 255, nullptr);
+
+                ComPtr<IMFTransform> candidate;
+                hr = activates[i]->ActivateObject(IID_PPV_ARGS(candidate.GetAddressOf()));
+                if (SUCCEEDED(hr)) {
+                    ComPtr<IMFAttributes> attrs;
+                    if (SUCCEEDED(candidate->GetAttributes(attrs.GetAddressOf()))) {
+                        attrs->SetUINT32(MF_SA_D3D11_AWARE, TRUE);
+                        if (isAsync) attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
+                    }
+                    ComPtr<IMFAttributes> inAttrs;
+                    if (SUCCEEDED(candidate->GetInputStreamAttributes(0, inAttrs.GetAddressOf()))) {
+                        inAttrs->SetUINT32(MF_SA_D3D11_AWARE, TRUE);
+                    }
+                    if (dxgiManager) {
+                        candidate->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)dxgiManager);
+                    }
+
+                    ConfigureCodecAPI(candidate.Get(), fps, bitrateBps, CODEC_HEVC, sliceCount);
+                    if (ConfigureEncoderMediaTypes(candidate.Get(), width, height, fps, bitrateBps, CODEC_HEVC)) {
+                        wprintf(L"Selected Zero-Latency Next-Gen Encoder: %s [HEVC/H.265] (Async=%u, Mode=Hardware)\n", name, isAsync);
+                        outTransform = candidate;
+                        outIsAsync = (isAsync != 0);
+                        activeCodec = CODEC_HEVC;
+                        for (UINT32 j = 0; j < count; j++) activates[j]->Release();
+                        CoTaskMemFree(activates);
+                        return true;
+                    }
+                }
+            }
+            for (UINT32 i = 0; i < count; i++) activates[i]->Release();
+            CoTaskMemFree(activates);
+        }
+        printf("[HwEncoder] Hardware HEVC encoder not available or rejected parameters, falling back to H.264...\n");
+    }
+
+    // Fallback or explicit H.264 search
+    MFT_REGISTER_TYPE_INFO outTypeH264 = { MFMediaType_Video, MFVideoFormat_H264 };
     for (int searchMode = 0; searchMode < 2; searchMode++) {
         UINT32 enumFlags = (searchMode == 0) ? (MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER) : MFT_ENUM_FLAG_ALL;
         IMFActivate** activates = nullptr;
         UINT32 count = 0;
-        HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, &inType, &outType, &activates, &count);
+        HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, &inType, &outTypeH264, &activates, &count);
         if (FAILED(hr) || count == 0) continue;
 
         for (UINT32 i = 0; i < count; i++) {
@@ -237,12 +301,13 @@ static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& out
                     }
                 }
 
-                ConfigureCodecAPI(candidate.Get(), fps, bitrateBps);
+                ConfigureCodecAPI(candidate.Get(), fps, bitrateBps, CODEC_H264, sliceCount);
 
-                if (ConfigureEncoderMediaTypes(candidate.Get(), width, height, fps, bitrateBps)) {
-                    wprintf(L"Selected Zero-Latency Encoder: %s (Async=%u, Mode=%s)\n", name, isAsync, (searchMode == 0 ? L"Hardware" : L"Software"));
+                if (ConfigureEncoderMediaTypes(candidate.Get(), width, height, fps, bitrateBps, CODEC_H264)) {
+                    wprintf(L"Selected Zero-Latency Encoder: %s [H.264] (Async=%u, Mode=%s)\n", name, isAsync, (searchMode == 0 ? L"Hardware" : L"Software"));
                     outTransform = candidate;
                     outIsAsync = (isAsync != 0);
+                    activeCodec = CODEC_H264;
                     for (UINT32 j = 0; j < count; j++) activates[j]->Release();
                     CoTaskMemFree(activates);
                     return true;
@@ -285,19 +350,15 @@ bool HwEncoder::InitGpuPipeline(ID3D11Device* d3dDevice, ID3D11DeviceContext* d3
     nv12Desc.Format = DXGI_FORMAT_NV12;
     nv12Desc.SampleDesc.Count = 1;
     nv12Desc.Usage = D3D11_USAGE_DEFAULT;
-    nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET;
 
     D3D11_VIDEO_PROCESSOR_CONTENT_DESC vpDesc = {};
     vpDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
-    vpDesc.InputFrameRate.Numerator = fps_;
-    vpDesc.InputFrameRate.Denominator = 1;
     vpDesc.InputWidth = inWidth;
     vpDesc.InputHeight = inHeight;
     vpDesc.OutputWidth = width_;
     vpDesc.OutputHeight = height_;
-    vpDesc.OutputFrameRate.Numerator = fps_;
-    vpDesc.OutputFrameRate.Denominator = 1;
-    vpDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+    vpDesc.Usage = D3D11_VIDEO_USAGE_OPTIMAL_SPEED;
 
     hr = videoDevice_->CreateVideoProcessorEnumerator(&vpDesc, vpEnum_.ReleaseAndGetAddressOf());
     if (FAILED(hr)) {
@@ -311,6 +372,11 @@ bool HwEncoder::InitGpuPipeline(ID3D11Device* d3dDevice, ID3D11DeviceContext* d3
         return false;
     }
 
+    D3D11_VIDEO_COLOR vpBg = {};
+    vpBg.RGBA.A = 1.0f;
+    videoContext_->VideoProcessorSetOutputBackgroundColor(videoProcessor_.Get(), FALSE, &vpBg);
+    videoContext_->VideoProcessorSetStreamFrameFormat(videoProcessor_.Get(), 0, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE);
+
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outViewDesc = {};
     outViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
     outViewDesc.Texture2D.MipSlice = 0;
@@ -318,27 +384,23 @@ bool HwEncoder::InitGpuPipeline(ID3D11Device* d3dDevice, ID3D11DeviceContext* d3
     for (size_t i = 0; i < GPU_RING_SIZE; i++) {
         hr = d3dDevice_->CreateTexture2D(&nv12Desc, nullptr, nv12Textures_[i].ReleaseAndGetAddressOf());
         if (FAILED(hr)) {
-            printf("[HwEncoder] Failed to create NV12 GPU texture [%zu]: 0x%08x\n", i, hr);
+            printf("[HwEncoder] CreateTexture2D NV12[%zu] failed: 0x%08x\n", i, hr);
             return false;
         }
 
         hr = videoDevice_->CreateVideoProcessorOutputView(nv12Textures_[i].Get(), vpEnum_.Get(), &outViewDesc, vpOutputViews_[i].ReleaseAndGetAddressOf());
         if (FAILED(hr)) {
-            printf("[HwEncoder] CreateVideoProcessorOutputView [%zu] failed: 0x%08x\n", i, hr);
+            printf("[HwEncoder] CreateVideoProcessorOutputView[%zu] failed: 0x%08x\n", i, hr);
             return false;
         }
 
         hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12Textures_[i].Get(), 0, FALSE, dxgiMediaBuffers_[i].ReleaseAndGetAddressOf());
         if (FAILED(hr)) {
-            printf("[HwEncoder] MFCreateDXGISurfaceBuffer [%zu] failed: 0x%08x\n", i, hr);
+            printf("[HwEncoder] MFCreateDXGISurfaceBuffer[%zu] failed: 0x%08x\n", i, hr);
             return false;
         }
 
-        hr = MFCreateSample(gpuSamples_[i].ReleaseAndGetAddressOf());
-        if (FAILED(hr)) {
-            printf("[HwEncoder] MFCreateSample [%zu] failed: 0x%08x\n", i, hr);
-            return false;
-        }
+        MFCreateSample(gpuSamples_[i].ReleaseAndGetAddressOf());
         gpuSamples_[i]->AddBuffer(dxgiMediaBuffers_[i].Get());
     }
 
@@ -349,10 +411,11 @@ bool HwEncoder::InitGpuPipeline(ID3D11Device* d3dDevice, ID3D11DeviceContext* d3
     return true;
 }
 
-bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11Device* d3dDevice, ID3D11DeviceContext* d3dContext, UINT inWidth, UINT inHeight) {
+bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11Device* d3dDevice, ID3D11DeviceContext* d3dContext, UINT inWidth, UINT inHeight, VideoCodec codec) {
     width_ = width;
     height_ = height;
     fps_ = fps;
+    activeCodec_ = codec;
 
     HRESULT hr = MFStartup(MF_VERSION);
     if (FAILED(hr)) {
@@ -375,8 +438,8 @@ bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11D
     }
 
     // 2. Find and activate encoder (hardware MFT prioritized, D3D manager linked before media types)
-    if (!FindAndActivateEncoder(encoder_, isAsync_, width, height, fps, bitrateBps, dxgiManager_.Get())) {
-        printf("Could not find or configure any H.264 encoder MFT.\n");
+    if (!FindAndActivateEncoder(encoder_, isAsync_, activeCodec_, width, height, fps, bitrateBps, dxgiManager_.Get(), codec, sliceCount_)) {
+        printf("Could not find or configure any video encoder MFT.\n");
         return false;
     }
 
@@ -427,8 +490,8 @@ bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11D
         outSampleHolder_->AddBuffer(outBufferHolder_.Get());
     }
 
-    printf("H.264 Zero-Latency Parallel Encoder ready: %ux%u @ %ufps, %u bps (GPU Zero-Copy: %s)\n",
-           width, height, fps, bitrateBps, isGpuAccelerated_ ? "ENABLED" : "DISABLED");
+    printf("H.264/HEVC Zero-Latency Parallel Encoder ready: %ux%u @ %ufps, %u bps (Codec: %s, Slices: %u, GPU Zero-Copy: %s)\n",
+           width, height, fps, bitrateBps, activeCodec_ == CODEC_HEVC ? "H.265 (HEVC)" : "H.264 (AVC)", sliceCount_, isGpuAccelerated_ ? "ENABLED" : "DISABLED");
     return true;
 }
 

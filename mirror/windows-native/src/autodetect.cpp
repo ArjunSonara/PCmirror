@@ -19,19 +19,28 @@ static std::string RunProcessAndCapture(const std::string& cmd, DWORD timeoutMs 
     if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return "";
     SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = hWrite;
-    si.hStdError = hWrite;
-    si.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
+    STARTUPINFOEXA siex = {};
+    siex.StartupInfo.cb = sizeof(STARTUPINFOEXA);
+    siex.StartupInfo.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    siex.StartupInfo.hStdOutput = hWrite;
+    siex.StartupInfo.hStdError = hWrite;
+    siex.StartupInfo.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    siex.StartupInfo.wShowWindow = SW_HIDE;
+
+    SIZE_T attrSize = 0;
+    InitializeProcThreadAttributeList(NULL, 1, 0, &attrSize);
+    std::vector<BYTE> attrList(attrSize);
+    siex.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)attrList.data();
+    InitializeProcThreadAttributeList(siex.lpAttributeList, 1, 0, &attrSize);
+
+    HANDLE inheritHandles[1] = { hWrite };
+    UpdateProcThreadAttribute(siex.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritHandles, sizeof(inheritHandles), NULL, NULL);
 
     PROCESS_INFORMATION pi = {};
     std::string cmdCopy = cmd;
     std::string output;
 
-    if (CreateProcessA(NULL, &cmdCopy[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+    if (CreateProcessA(NULL, &cmdCopy[0], NULL, NULL, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, NULL, NULL, &siex.StartupInfo, &pi)) {
         CloseHandle(hWrite);
         hWrite = NULL;
 
@@ -50,7 +59,6 @@ static std::string RunProcessAndCapture(const std::string& cmd, DWORD timeoutMs 
 
             DWORD waitRes = WaitForSingleObject(pi.hProcess, 50);
             if (waitRes == WAIT_OBJECT_0) {
-                // Drain any final output
                 while (PeekNamedPipe(hRead, NULL, 0, NULL, &bytesAvail, NULL) && bytesAvail > 0) {
                     char buffer[512];
                     DWORD bytesToRead = min((DWORD)(sizeof(buffer) - 1), bytesAvail);
@@ -76,6 +84,7 @@ static std::string RunProcessAndCapture(const std::string& cmd, DWORD timeoutMs 
     } else {
         CloseHandle(hWrite);
     }
+    DeleteProcThreadAttributeList(siex.lpAttributeList);
     CloseHandle(hRead);
     return output;
 }

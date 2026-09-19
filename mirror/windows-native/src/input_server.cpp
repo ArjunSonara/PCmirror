@@ -132,6 +132,24 @@ void InputServer::Run(int port) {
                 continue;
             }
 
+            // Command 15: Adaptive Real-Time Congestion Feedback (scale factor)
+            if (pkt.type == 15) {
+                float scale = pkt.p1;
+                if (scale > 0.4f && scale < 2.0f) {
+                    if (OnCongestionScale) OnCongestionScale(scale);
+                }
+                continue;
+            }
+
+            // Command 16: Dynamic Video Codec Change (0 = H.264, 1 = H.265/HEVC)
+            if (pkt.type == 16) {
+                uint32_t codecId = (uint32_t)pkt.p1;
+                printf("[InputServer] Received codec change request: %s\n", codecId == 1 ? "HEVC (H.265)" : "H.264 (AVC)");
+                fflush(stdout);
+                if (OnCodecChange) OnCodecChange(codecId);
+                continue;
+            }
+
             // Touch event handling (0 = DOWN, 1 = MOVE, 2 = UP)
             float clampedX = pkt.p1 < 0.0f ? 0.0f : (pkt.p1 > 1.0f ? 1.0f : pkt.p1);
             float clampedY = pkt.p2 < 0.0f ? 0.0f : (pkt.p2 > 1.0f ? 1.0f : pkt.p2);

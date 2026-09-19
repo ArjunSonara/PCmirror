@@ -14,9 +14,14 @@
 
 using Microsoft::WRL::ComPtr;
 
+enum VideoCodec {
+    CODEC_H264 = 0,
+    CODEC_HEVC = 1
+};
+
 class HwEncoder {
 public:
-    bool Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11Device* d3dDevice = nullptr, ID3D11DeviceContext* d3dContext = nullptr, UINT inWidth = 0, UINT inHeight = 0);
+    bool Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11Device* d3dDevice = nullptr, ID3D11DeviceContext* d3dContext = nullptr, UINT inWidth = 0, UINT inHeight = 0, VideoCodec codec = CODEC_HEVC);
     bool EncodeFrameGpu(ID3D11Texture2D* bgraTexture);
     void EncodeFrame(const uint8_t* bgra, UINT stride);
     void EncodeFrame(const std::vector<uint8_t>& bgra, UINT stride);
@@ -26,6 +31,7 @@ public:
     void Shutdown();
 
     bool IsGpuAccelerated() const { return isGpuAccelerated_; }
+    VideoCodec GetCodec() const { return activeCodec_; }
 
     std::function<void(const uint8_t* data, size_t len)> OnNal;
 
@@ -77,4 +83,6 @@ private:
     LONGLONG frameCount_ = 0;
     MFT_OUTPUT_STREAM_INFO streamInfo_ = {};
     bool isAsync_ = false;
+    VideoCodec activeCodec_ = CODEC_HEVC;
+    UINT sliceCount_ = 4;
 };

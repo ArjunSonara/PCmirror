@@ -80,7 +80,7 @@ void AudioServer::Run(int port) {
 
         BOOL nodelay = TRUE;
         setsockopt(client, IPPROTO_TCP, TCP_NODELAY, (char*)&nodelay, sizeof(nodelay));
-        int sndBuf = 64 * 1024;
+        int sndBuf = 8 * 1024; // 8KB buffer prevents kernel socket buffering latency
         setsockopt(client, SOL_SOCKET, SO_SNDBUF, (char*)&sndBuf, sizeof(sndBuf));
 
         printf("[AudioServer] Android client connected for real-time audio streaming!\n");
@@ -133,8 +133,8 @@ void AudioServer::Run(int port) {
         uint16_t channels = (uint16_t)pwfx->nChannels;
         printf("[AudioServer] Native audio format: %u Hz, %u channels\n", sampleRate, channels);
 
-        // Request 20ms buffer duration (200,000 x 100ns)
-        REFERENCE_TIME hnsRequestedDuration = 200000;
+        // Request 10ms ultra-low latency buffer duration (100,000 x 100ns)
+        REFERENCE_TIME hnsRequestedDuration = 100000;
         hr = pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, hnsRequestedDuration, 0, pwfx, NULL);
         if (FAILED(hr)) {
             printf("[AudioServer] Failed to initialize audio client in loopback mode (0x%08lx)\n", hr);
@@ -187,51 +187,67 @@ void AudioServer::Run(int port) {
             if (FAILED(hr)) break;
 
             if (packetLength == 0) {
-                Sleep(5);
+                // Check if client disconnected during silence
+                fd_set rset;
+                FD_ZERO(&rset);
+                FD_SET(client, &rset);
+                timeval tv = { 0, 0 };
+                if (select(0, &rset, NULL, NULL, &tv) > 0) {
+                    char dummy;
+                    int r = recv(client, &dummy, 1, MSG_PEEK);
+                    if (r <= 0) {
+                        printf("[AudioServer] Client disconnected during idle silence.\n");
+                        break;
+                    }
+                }
+                Sleep(1);
                 continue;
             }
 
-            BYTE* pData = NULL;
-            UINT32 numFramesAvailable = 0;
-            DWORD flags = 0;
+            // Immediately drain all available audio frames to avoid queue accumulation
+            while (packetLength > 0 && running_) {
+                BYTE* pData = NULL;
+                UINT32 numFramesAvailable = 0;
+                DWORD flags = 0;
 
-            hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL);
-            if (FAILED(hr)) break;
+                hr = pCaptureClient->GetBuffer(&pData, &numFramesAvailable, &flags, NULL, NULL);
+                if (FAILED(hr)) break;
 
-            pcm.resize((size_t)numFramesAvailable * 2);
+                pcm.resize((size_t)numFramesAvailable * 2);
 
-            if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
-                memset(pcm.data(), 0, pcm.size() * sizeof(int16_t));
-            } else if (pData) {
-                const float* fData = (const float*)pData;
-                for (UINT32 i = 0; i < numFramesAvailable; ++i) {
-                    float l = fData[i * channels + 0];
-                    float r = (channels > 1) ? fData[i * channels + 1] : l;
-                    pcm[i * 2 + 0] = FloatToPcm16(l);
-                    pcm[i * 2 + 1] = FloatToPcm16(r);
+                if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
+                    memset(pcm.data(), 0, pcm.size() * sizeof(int16_t));
+                } else if (pData) {
+                    const float* fData = (const float*)pData;
+                    for (UINT32 i = 0; i < numFramesAvailable; ++i) {
+                        float l = fData[i * channels + 0];
+                        float r = (channels > 1) ? fData[i * channels + 1] : l;
+                        pcm[i * 2 + 0] = FloatToPcm16(l);
+                        pcm[i * 2 + 1] = FloatToPcm16(r);
+                    }
                 }
-            }
 
-            pCaptureClient->ReleaseBuffer(numFramesAvailable);
+                pCaptureClient->ReleaseBuffer(numFramesAvailable);
 
-            // Send converted 16-bit stereo PCM chunk
-            int toSend = (int)(pcm.size() * sizeof(int16_t));
-            int sent = 0;
-            const char* buf = (const char*)pcm.data();
-            bool sendFailed = false;
+                // Send converted 16-bit stereo PCM chunk
+                int toSend = (int)(pcm.size() * sizeof(int16_t));
+                int sent = 0;
+                const char* buf = (const char*)pcm.data();
+                bool sendFailed = false;
 
-            while (sent < toSend) {
-                int s = send(client, buf + sent, toSend - sent, 0);
-                if (s <= 0) {
-                    sendFailed = true;
-                    break;
+                while (sent < toSend) {
+                    int s = send(client, buf + sent, toSend - sent, 0);
+                    if (s <= 0) {
+                        sendFailed = true;
+                        break;
+                    }
+                    sent += s;
                 }
-                sent += s;
-            }
 
-            if (sendFailed) {
-                printf("[AudioServer] Client disconnected from audio stream.\n");
-                break;
+                if (sendFailed) break;
+
+                hr = pCaptureClient->GetNextPacketSize(&packetLength);
+                if (FAILED(hr)) break;
             }
         }
 
