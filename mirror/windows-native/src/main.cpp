@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
             if (!clientActive) return;
             {
                 std::lock_guard<std::mutex> lock(queueMutex);
-                if (sendQueue.size() >= 25) {
+                if (sendQueue.size() >= 3) {
                     sendQueue.pop_front();
                 }
                 sendQueue.emplace_back(data, data + len);
@@ -333,7 +333,7 @@ int main(int argc, char** argv) {
 
             if (encoder.IsGpuAccelerated()) {
                 ID3D11Texture2D* gpuTex = nullptr;
-                if (capture.GrabFrameGpu(&gpuTex, 16)) {
+                if (capture.GrabFrameGpu(&gpuTex, 2)) {
                     if (capture.CheckAndClearReinitialized()) {
                         printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
                         encoder.RequestKeyframe();
@@ -359,7 +359,7 @@ int main(int argc, char** argv) {
                 }
             } else {
                 // CPU fallback path (AVX2)
-                if (capture.GrabFrame(bgra, w, h, stride, 16)) {
+                if (capture.GrabFrame(bgra, w, h, stride, 2)) {
                     if (capture.CheckAndClearReinitialized()) {
                         printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
                         encoder.RequestKeyframe();

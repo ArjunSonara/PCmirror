@@ -1,12 +1,19 @@
 #include "capture.h"
 #include <stdio.h>
 #include <windows.h>
+#include <avrt.h>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "avrt.lib")
 
 bool DesktopCapture::Init(UINT outputIndex) {
     outputIndex_ = outputIndex;
+
+    // Elevate priority and register with Windows Multimedia Real-Time Scheduler
+    SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    DWORD mmcssTaskIndex = 0;
+    AvSetMmThreadCharacteristicsW(L"Capture", &mmcssTaskIndex);
 
     // Attach current thread to the interactive input desktop
     HDESK hDesk = OpenInputDesktop(0, FALSE, GENERIC_ALL);
@@ -54,6 +61,15 @@ bool DesktopCapture::Init(UINT outputIndex) {
                     ComPtr<ID3D10Multithread> multithread;
                     if (SUCCEEDED(device_.As(&multithread))) {
                         multithread->SetMultithreadProtected(TRUE);
+                    }
+
+                    // Boost GPU thread priority to maximum (+7) so WDDM prioritizes mirror capture ahead of heavy 3D games
+                    ComPtr<IDXGIDevice> dxgiDev;
+                    if (SUCCEEDED(device_.As(&dxgiDev))) {
+                        HRESULT hrPrio = dxgiDev->SetGPUThreadPriority(7);
+                        if (SUCCEEDED(hrPrio)) {
+                            wprintf(L"[DesktopCapture] GPU Thread Priority boosted to +7 (VIP priority over 3D games)!\n");
+                        }
                     }
 
                     ComPtr<IDXGIOutput1> output1;

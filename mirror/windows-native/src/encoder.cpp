@@ -113,8 +113,8 @@ static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps, 
         v.vt = VT_UI4; v.ulVal = fps;
         codecApi->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
 
-        // 8. Max QP = 36: provides headroom to compress frames during intense motion rather than ballooning size
-        v.vt = VT_UI4; v.ulVal = 36;
+        // 8. Max QP = 28: hard quality floor prevents aggressive blur/macroblocking during fast camera swipes
+        v.vt = VT_UI4; v.ulVal = 28;
         codecApi->SetValue(&CODECAPI_AVEncVideoMaxQP, &v);
 
         // 9. Min QP = 12 for clean gradients
