@@ -10,6 +10,10 @@
 #include <atomic>
 
 #include <timeapi.h>
+#include <deque>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -51,7 +55,7 @@ int main(int argc, char** argv) {
     UINT customWidth = argc > 2 ? atoi(argv[2]) : 0;
     UINT customHeight = argc > 3 ? atoi(argv[3]) : 0;
     UINT fps = argc > 4 ? atoi(argv[4]) : 60;
-    UINT bitrate = argc > 5 ? atoi(argv[5]) : 40000000;
+    UINT bitrate = argc > 5 ? atoi(argv[5]) : 80000000;
 
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     timeBeginPeriod(1);
@@ -108,8 +112,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Auto-detect optimal transport (RNDIS vs ADB reverse) and launch app on phone
-    AutoDetectAndLaunch(port);
+    // Auto-detect optimal transport (RNDIS vs ADB reverse) and launch app on phone (unless managed by parent)
+    bool enableAdbWatcher = true;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--no-adb-watcher") == 0 || strcmp(argv[i], "--no-adb") == 0) {
+            enableAdbWatcher = false;
+        }
+    }
+    if (enableAdbWatcher) {
+        AutoDetectAndLaunch(port);
+    }
 
     while (g_running) {
         printf("\nWaiting for Android app to connect...\n");
@@ -120,7 +132,7 @@ int main(int argc, char** argv) {
         }
 
         HwEncoder encoder;
-        if (!encoder.Init(streamWidth, streamHeight, fps, bitrate)) {
+        if (!encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight())) {
             printf("[ERROR] Failed to initialize H.264 hardware encoder.\n");
             server.DisconnectClient();
             Sleep(1000);
@@ -162,17 +174,49 @@ int main(int argc, char** argv) {
         };
 
         std::atomic<bool> clientActive{ true };
-        size_t totalBytesSent = 0;
+        std::atomic<bool> senderRunning{ true };
+        std::deque<std::vector<uint8_t>> sendQueue;
+        std::mutex queueMutex;
+        std::condition_variable queueCv;
+        std::atomic<size_t> totalBytesSent{ 0 };
         size_t frameCount = 0;
         double totalCapSec = 0;
         double totalEncSec = 0;
 
-        encoder.OnNal = [&](const uint8_t* data, size_t len) {
-            if (!server.SendPacket(data, len)) {
-                printf("\nPhone disconnected.\n");
-                clientActive = false;
+        std::thread senderThread([&]() {
+            while (senderRunning && clientActive) {
+                std::vector<uint8_t> packet;
+                {
+                    std::unique_lock<std::mutex> lock(queueMutex);
+                    queueCv.wait(lock, [&]() {
+                        return !senderRunning || !clientActive || !sendQueue.empty();
+                    });
+                    if (!senderRunning || !clientActive) break;
+                    packet = std::move(sendQueue.front());
+                    sendQueue.pop_front();
+                }
+
+                if (!server.SendPacket(packet.data(), packet.size())) {
+                    printf("\nPhone disconnected.\n");
+                    clientActive = false;
+                    break;
+                }
+                totalBytesSent += (packet.size() + 4);
             }
-            totalBytesSent += (len + 4);
+        });
+
+        encoder.OnNal = [&](const uint8_t* data, size_t len) {
+            if (!clientActive) return;
+            {
+                std::lock_guard<std::mutex> lock(queueMutex);
+                if (sendQueue.size() >= 2) {
+                    // Send queue backlogged: clear stale buffered frames and request keyframe immediately
+                    sendQueue.clear();
+                    encoder.RequestKeyframe();
+                }
+                sendQueue.emplace_back(data, data + len);
+            }
+            queueCv.notify_one();
         };
 
         printf(">>> STREAMING LIVE DESKTOP TO ANDROID. Press Ctrl+C to exit. <<<\n");
@@ -189,25 +233,42 @@ int main(int argc, char** argv) {
 
         // Force DWM to produce an initial desktop frame immediately upon connection
         mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0);
-        int initTries = 0;
-        while (g_running && clientActive && !capture.GrabFrame(bgra, w, h, stride, 50) && initTries < 20) {
-            mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0);
-            Sleep(10);
-            initTries++;
-        }
-        if (bgra.size() > 0) {
-            printf("Sending initial desktop keyframe to Android...\n");
-            encoder.RequestKeyframe();
-            if (streamWidth != w || streamHeight != h) {
-                UINT scaledStride = streamWidth * 4;
-                scaledBgra.resize((size_t)scaledStride * streamHeight);
-                DownscaleBgra(bgra.data(), w, h, stride, scaledBgra.data(), streamWidth, streamHeight, scaledStride);
-                encoder.EncodeFrame(scaledBgra, scaledStride);
-            } else {
-                encoder.EncodeFrame(bgra, stride);
+        if (encoder.IsGpuAccelerated()) {
+            ID3D11Texture2D* gpuTex = nullptr;
+            int initTries = 0;
+            while (g_running && clientActive && !capture.GrabFrameGpu(&gpuTex, 50) && initTries < 20) {
+                mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0);
+                Sleep(10);
+                initTries++;
             }
-            QueryPerformanceCounter(&now);
-            lastFrameSec = (double)now.QuadPart / (double)freq.QuadPart;
+            if (gpuTex) {
+                printf("Sending initial desktop keyframe (GPU Zero-Copy) to Android...\n");
+                encoder.RequestKeyframe();
+                encoder.EncodeFrameGpu(gpuTex);
+                QueryPerformanceCounter(&now);
+                lastFrameSec = (double)now.QuadPart / (double)freq.QuadPart;
+            }
+        } else {
+            int initTries = 0;
+            while (g_running && clientActive && !capture.GrabFrame(bgra, w, h, stride, 50) && initTries < 20) {
+                mouse_event(MOUSEEVENTF_MOVE, 0, 0, 0, 0);
+                Sleep(10);
+                initTries++;
+            }
+            if (bgra.size() > 0) {
+                printf("Sending initial desktop keyframe to Android...\n");
+                encoder.RequestKeyframe();
+                if (streamWidth != w || streamHeight != h) {
+                    UINT scaledStride = streamWidth * 4;
+                    scaledBgra.resize((size_t)scaledStride * streamHeight);
+                    DownscaleBgra(bgra.data(), w, h, stride, scaledBgra.data(), streamWidth, streamHeight, scaledStride);
+                    encoder.EncodeFrame(scaledBgra, scaledStride);
+                } else {
+                    encoder.EncodeFrame(bgra, stride);
+                }
+                QueryPerformanceCounter(&now);
+                lastFrameSec = (double)now.QuadPart / (double)freq.QuadPart;
+            }
         }
 
         while (g_running && clientActive) {
@@ -216,48 +277,79 @@ int main(int argc, char** argv) {
                 streamWidth = reqWidth;
                 streamHeight = reqHeight;
                 printf("\n[PC Mirror] Dynamic Resolution Switching to %ux%u...\n", streamWidth, streamHeight);
+                {
+                    std::lock_guard<std::mutex> lock(queueMutex);
+                    sendQueue.clear();
+                }
                 encoder.Shutdown();
-                encoder.Init(streamWidth, streamHeight, fps, bitrate);
+                encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight());
                 encoder.RequestKeyframe();
             }
 
             LARGE_INTEGER tCap0, tCap1;
             QueryPerformanceCounter(&tCap0);
 
-            // DXGI blocks efficiently until DWM presents a new frame, up to 16ms
-            if (capture.GrabFrame(bgra, w, h, stride, 16)) {
-                if (capture.CheckAndClearReinitialized()) {
-                    printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
-                    encoder.RequestKeyframe();
-                }
-                QueryPerformanceCounter(&tCap1);
-                QueryPerformanceCounter(&now);
-                double currentSec = (double)now.QuadPart / (double)freq.QuadPart;
-                double delta = currentSec - lastFrameSec;
-
-                // Pace to target FPS (e.g. 60, 90, 120 FPS on a 144Hz screen)
-                double leadMargin = targetFrameInterval > 0.010 ? 0.003 : 0.0015;
-                if (delta >= (targetFrameInterval - leadMargin)) {
-                    LARGE_INTEGER tEnc0, tEnc1;
-                    QueryPerformanceCounter(&tEnc0);
-
-                    if (streamWidth != w || streamHeight != h) {
-                        UINT scaledStride = streamWidth * 4;
-                        if (scaledBgra.size() != (size_t)scaledStride * streamHeight) {
-                            scaledBgra.resize((size_t)scaledStride * streamHeight);
-                        }
-                        DownscaleBgra(bgra.data(), w, h, stride, scaledBgra.data(), streamWidth, streamHeight, scaledStride);
-                        encoder.EncodeFrame(scaledBgra, scaledStride);
-                    } else {
-                        encoder.EncodeFrame(bgra, stride);
+            if (encoder.IsGpuAccelerated()) {
+                ID3D11Texture2D* gpuTex = nullptr;
+                if (capture.GrabFrameGpu(&gpuTex, 16)) {
+                    if (capture.CheckAndClearReinitialized()) {
+                        printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
+                        encoder.RequestKeyframe();
                     }
+                    QueryPerformanceCounter(&tCap1);
+                    QueryPerformanceCounter(&now);
+                    double currentSec = (double)now.QuadPart / (double)freq.QuadPart;
+                    double delta = currentSec - lastFrameSec;
 
-                    QueryPerformanceCounter(&tEnc1);
+                    double leadMargin = targetFrameInterval > 0.010 ? 0.003 : 0.0015;
+                    if (delta >= (targetFrameInterval - leadMargin)) {
+                        LARGE_INTEGER tEnc0, tEnc1;
+                        QueryPerformanceCounter(&tEnc0);
 
-                    lastFrameSec = currentSec;
-                    totalCapSec += (tCap1.QuadPart - tCap0.QuadPart) / (double)freq.QuadPart;
-                    totalEncSec += (tEnc1.QuadPart - tEnc0.QuadPart) / (double)freq.QuadPart;
-                    frameCount++;
+                        if (encoder.EncodeFrameGpu(gpuTex)) {
+                            QueryPerformanceCounter(&tEnc1);
+                            lastFrameSec = currentSec;
+                            totalCapSec += (tCap1.QuadPart - tCap0.QuadPart) / (double)freq.QuadPart;
+                            totalEncSec += (tEnc1.QuadPart - tEnc0.QuadPart) / (double)freq.QuadPart;
+                            frameCount++;
+                        }
+                    }
+                }
+            } else {
+                // CPU fallback path (AVX2)
+                if (capture.GrabFrame(bgra, w, h, stride, 16)) {
+                    if (capture.CheckAndClearReinitialized()) {
+                        printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
+                        encoder.RequestKeyframe();
+                    }
+                    QueryPerformanceCounter(&tCap1);
+                    QueryPerformanceCounter(&now);
+                    double currentSec = (double)now.QuadPart / (double)freq.QuadPart;
+                    double delta = currentSec - lastFrameSec;
+
+                    double leadMargin = targetFrameInterval > 0.010 ? 0.003 : 0.0015;
+                    if (delta >= (targetFrameInterval - leadMargin)) {
+                        LARGE_INTEGER tEnc0, tEnc1;
+                        QueryPerformanceCounter(&tEnc0);
+
+                        if (streamWidth != w || streamHeight != h) {
+                            UINT scaledStride = streamWidth * 4;
+                            if (scaledBgra.size() != (size_t)scaledStride * streamHeight) {
+                                scaledBgra.resize((size_t)scaledStride * streamHeight);
+                            }
+                            DownscaleBgra(bgra.data(), w, h, stride, scaledBgra.data(), streamWidth, streamHeight, scaledStride);
+                            encoder.EncodeFrame(scaledBgra, scaledStride);
+                        } else {
+                            encoder.EncodeFrame(bgra, stride);
+                        }
+
+                        QueryPerformanceCounter(&tEnc1);
+
+                        lastFrameSec = currentSec;
+                        totalCapSec += (tCap1.QuadPart - tCap0.QuadPart) / (double)freq.QuadPart;
+                        totalEncSec += (tEnc1.QuadPart - tEnc0.QuadPart) / (double)freq.QuadPart;
+                        frameCount++;
+                    }
                 }
             }
 
@@ -279,8 +371,13 @@ int main(int argc, char** argv) {
             }
         }
 
+        senderRunning = false;
+        server.DisconnectClient(); // Unblock WSASend if blocked
+        queueCv.notify_all();
+        if (senderThread.joinable()) {
+            senderThread.join();
+        }
         encoder.Shutdown();
-        server.DisconnectClient();
         if (g_running) {
             printf("[Notice] Client disconnected. Re-listening for connection...\n");
         }

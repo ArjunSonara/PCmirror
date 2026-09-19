@@ -204,6 +204,7 @@ AutoConfig AutoDetectAndLaunch(int port) {
     printf("[2/3] Detecting optimal USB transport...\n");
     if (cfg.deviceConnected) {
         // Guarantee ADB reverse is always active (bypasses Windows Firewall completely)
+        RunProcessAndCapture(cfg.adbPath + " reverse tcp:6001 tcp:6001");
         RunProcessAndCapture(cfg.adbPath + " reverse tcp:" + std::to_string(port) + " tcp:" + std::to_string(port));
         RunProcessAndCapture(cfg.adbPath + " reverse tcp:" + std::to_string(port + 1) + " tcp:" + std::to_string(port + 1));
         RunProcessAndCapture(cfg.adbPath + " reverse tcp:" + std::to_string(port + 2) + " tcp:" + std::to_string(port + 2));
@@ -242,6 +243,7 @@ void StartAdbWatcher(int port) {
             if (!g_watcherRunning) break;
             std::string revList = RunProcessAndCapture(adb + " reverse --list", 5000);
             if (revList.find("tcp:" + std::to_string(port)) == std::string::npos) {
+                RunProcessAndCapture(adb + " reverse tcp:6001 tcp:6001", 5000);
                 RunProcessAndCapture(adb + " reverse tcp:" + std::to_string(port) + " tcp:" + std::to_string(port), 5000);
                 RunProcessAndCapture(adb + " reverse tcp:" + std::to_string(port + 1) + " tcp:" + std::to_string(port + 1), 5000);
                 RunProcessAndCapture(adb + " reverse tcp:" + std::to_string(port + 2) + " tcp:" + std::to_string(port + 2), 5000);

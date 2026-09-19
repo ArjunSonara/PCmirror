@@ -3,7 +3,70 @@
 #include <icodecapi.h>
 #include <mferror.h>
 #include <immintrin.h>
+#include <dxgi1_2.h>
 #include <stdio.h>
+#include <chrono>
+
+class EncoderEventCallback : public IMFAsyncCallback {
+public:
+    EncoderEventCallback(HwEncoder* parent) : parent_(parent), refCount_(1) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_IMFAsyncCallback) {
+            *ppv = static_cast<IMFAsyncCallback*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() override {
+        return InterlockedIncrement(&refCount_);
+    }
+
+    STDMETHODIMP_(ULONG) Release() override {
+        ULONG count = InterlockedDecrement(&refCount_);
+        if (count == 0) delete this;
+        return count;
+    }
+
+    STDMETHODIMP GetParameters(DWORD*, DWORD*) override {
+        return E_NOTIMPL;
+    }
+
+    STDMETHODIMP Invoke(IMFAsyncResult* pResult) override;
+
+private:
+    HwEncoder* parent_;
+    long refCount_;
+};
+
+STDMETHODIMP EncoderEventCallback::Invoke(IMFAsyncResult* pResult) {
+    if (!parent_ || !parent_->isStreaming_ || !parent_->eventGen_) {
+        return S_OK;
+    }
+
+    ComPtr<IMFMediaEvent> pEvent;
+    HRESULT hr = parent_->eventGen_->EndGetEvent(pResult, pEvent.GetAddressOf());
+    if (FAILED(hr)) return hr;
+
+    MediaEventType met = MEUnknown;
+    pEvent->GetType(&met);
+
+    if (met == METransformNeedInput) {
+        parent_->canAcceptInput_ = true;
+        parent_->inputCv_.notify_one();
+    } else if (met == METransformHaveOutput) {
+        parent_->DrainAsyncOutput();
+    }
+
+    if (parent_->isStreaming_ && parent_->eventGen_) {
+        parent_->eventGen_->BeginGetEvent(this, nullptr);
+    }
+    return S_OK;
+}
 
 static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps) {
     ComPtr<ICodecAPI> codecApi;
@@ -19,34 +82,26 @@ static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps) 
         v.vt = VT_UI4; v.ulVal = 0;
         codecApi->SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &v);
 
-        // 3. Balanced preset (33) gives encoder deeper motion estimation during camera swipes without latency penalty
-        v.vt = VT_UI4; v.ulVal = 33;
-        if (FAILED(codecApi->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v))) {
-            v.ulVal = 0;
-            codecApi->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
-        }
+        // 3. Ultra-fast speed preset (0) maximizes hardware encoder throughput for lowest latency
+        v.vt = VT_UI4; v.ulVal = 0;
+        codecApi->SetValue(&CODECAPI_AVEncCommonQualityVsSpeed, &v);
 
-        // 4. Rate Control: Try Unconstrained VBR (eAVEncCommonRateControlMode_UnconstrainedVBR = 2)
-        // This eliminates bit starvation and heavy quantization blur when swiping the mouse in games.
-        v.vt = VT_UI4; v.ulVal = eAVEncCommonRateControlMode_UnconstrainedVBR;
+        // 4. Rate Control: Prefer Peak-Constrained VBR (eAVEncCommonRateControlMode_PeakConstrainedVBR = 1)
+        // Constrains sudden frame ballooning during action while maintaining crisp quality.
+        v.vt = VT_UI4; v.ulVal = eAVEncCommonRateControlMode_PeakConstrainedVBR;
         HRESULT hrRc = codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
         if (FAILED(hrRc)) {
-            // Fallback to Peak-Constrained VBR if unconstrained is rejected
-            v.ulVal = eAVEncCommonRateControlMode_PeakConstrainedVBR;
-            hrRc = codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
-            if (FAILED(hrRc)) {
-                // Final fallback to CBR
-                v.ulVal = eAVEncCommonRateControlMode_CBR;
-                codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
-            }
+            // Fallback to CBR if Peak-Constrained VBR is rejected
+            v.ulVal = eAVEncCommonRateControlMode_CBR;
+            codecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &v);
         }
 
         // 5. Target Bitrate & Peak Burst allowance (up to 2.5x target bitrate for sudden motion spikes)
         v.vt = VT_UI4; v.ulVal = bitrateBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
 
-        UINT peakBps = (UINT)(bitrateBps * 2.5f);
-        if (peakBps > 150000000) peakBps = 150000000;
+        UINT peakBps = (UINT)(bitrateBps * 1.5f);
+        if (peakBps > 200000000) peakBps = 200000000;
         v.ulVal = peakBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
 
@@ -58,8 +113,8 @@ static void ConfigureCodecAPI(IMFTransform* encoder, UINT fps, UINT bitrateBps) 
         v.vt = VT_UI4; v.ulVal = fps;
         codecApi->SetValue(&CODECAPI_AVEncMPVGOPSize, &v);
 
-        // 8. Max QP = 28 to forbid encoder from degrading into pixel blocks during motion spikes
-        v.vt = VT_UI4; v.ulVal = 28;
+        // 8. Max QP = 36: provides headroom to compress frames during intense motion rather than ballooning size
+        v.vt = VT_UI4; v.ulVal = 36;
         codecApi->SetValue(&CODECAPI_AVEncVideoMaxQP, &v);
 
         // 9. Min QP = 12 for clean gradients
@@ -91,11 +146,9 @@ static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT h
 
     hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
     if (FAILED(hr)) {
-        printf("[HwEncoder] SetOutputType High Profile returned 0x%08x, trying Main...\n", hr);
         outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
         hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
         if (FAILED(hr)) {
-            printf("[HwEncoder] SetOutputType Main Profile returned 0x%08x, trying Base...\n", hr);
             outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
             hr = encoder->SetOutputType(0, outMediaType.Get(), 0);
             if (FAILED(hr)) {
@@ -105,13 +158,29 @@ static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT h
         }
     }
 
-    // Input type (NV12)
+    // Check available input types from the hardware encoder
     ComPtr<IMFMediaType> inMediaType;
-    hr = MFCreateMediaType(inMediaType.GetAddressOf());
-    if (FAILED(hr)) return false;
+    for (DWORD i = 0; i < 20; i++) {
+        ComPtr<IMFMediaType> avail;
+        if (SUCCEEDED(encoder->GetInputAvailableType(0, i, avail.GetAddressOf()))) {
+            GUID sub = {};
+            avail->GetGUID(MF_MT_SUBTYPE, &sub);
+            if (sub == MFVideoFormat_NV12) {
+                inMediaType = avail;
+                break;
+            }
+        } else {
+            break;
+        }
+    }
 
-    inMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    inMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    if (!inMediaType) {
+        hr = MFCreateMediaType(inMediaType.GetAddressOf());
+        if (FAILED(hr)) return false;
+        inMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+        inMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    }
+
     inMediaType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     MFSetAttributeSize(inMediaType.Get(), MF_MT_FRAME_SIZE, width, height);
     MFSetAttributeRatio(inMediaType.Get(), MF_MT_FRAME_RATE, fps, 1);
@@ -125,25 +194,22 @@ static bool ConfigureEncoderMediaTypes(IMFTransform* encoder, UINT width, UINT h
     return true;
 }
 
-static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& outIsAsync, UINT width, UINT height, UINT fps, UINT bitrateBps) {
+static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& outIsAsync, UINT width, UINT height, UINT fps, UINT bitrateBps, IMFDXGIDeviceManager* dxgiManager) {
     MFT_REGISTER_TYPE_INFO inType = { MFMediaType_Video, MFVideoFormat_NV12 };
     MFT_REGISTER_TYPE_INFO outType = { MFMediaType_Video, MFVideoFormat_H264 };
 
-    IMFActivate** activates = nullptr;
-    UINT32 count = 0;
-    HRESULT hr = MFTEnumEx(
-        MFT_CATEGORY_VIDEO_ENCODER,
-        MFT_ENUM_FLAG_ALL,
-        &inType, &outType, &activates, &count);
+    // Search pass 0: Hardware encoders (Intel QuickSync / NVENC / AMD AMF)
+    // Search pass 1: Fallback to all encoders (including Software MFT)
+    for (int searchMode = 0; searchMode < 2; searchMode++) {
+        UINT32 enumFlags = (searchMode == 0) ? (MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER) : MFT_ENUM_FLAG_ALL;
+        IMFActivate** activates = nullptr;
+        UINT32 count = 0;
+        HRESULT hr = MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, enumFlags, &inType, &outType, &activates, &count);
+        if (FAILED(hr) || count == 0) continue;
 
-    if (FAILED(hr) || count == 0) return false;
-
-    // First pass: try synchronous encoders (immediate 1-in-1-out without async event loop)
-    for (UINT32 pass = 0; pass < 2; pass++) {
         for (UINT32 i = 0; i < count; i++) {
             UINT32 isAsync = 0;
             activates[i]->GetUINT32(MF_TRANSFORM_ASYNC, &isAsync);
-            if (pass == 0 && isAsync != 0) continue; // Only sync on pass 0
 
             WCHAR name[256] = {};
             activates[i]->GetString(MFT_FRIENDLY_NAME_Attribute, name, 255, nullptr);
@@ -151,19 +217,30 @@ static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& out
             ComPtr<IMFTransform> candidate;
             hr = activates[i]->ActivateObject(IID_PPV_ARGS(candidate.GetAddressOf()));
             if (SUCCEEDED(hr)) {
-                if (isAsync) {
-                    ComPtr<IMFAttributes> attrs;
-                    if (SUCCEEDED(candidate->GetAttributes(attrs.GetAddressOf()))) {
+                ComPtr<IMFAttributes> attrs;
+                if (SUCCEEDED(candidate->GetAttributes(attrs.GetAddressOf()))) {
+                    attrs->SetUINT32(MF_SA_D3D11_AWARE, TRUE);
+                    if (isAsync) {
                         attrs->SetUINT32(MF_TRANSFORM_ASYNC_UNLOCK, TRUE);
                     }
                 }
 
-                // CRITICAL: Configure low latency CodecAPI BEFORE media type negotiation
-                // so internal hardware buffers are initialized with 0 lookahead delay!
+                ComPtr<IMFAttributes> inAttrs;
+                if (SUCCEEDED(candidate->GetInputStreamAttributes(0, inAttrs.GetAddressOf()))) {
+                    inAttrs->SetUINT32(MF_SA_D3D11_AWARE, TRUE);
+                }
+
+                if (dxgiManager) {
+                    hr = candidate->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)dxgiManager);
+                    if (SUCCEEDED(hr)) {
+                        wprintf(L"[HwEncoder] %s attached to Direct3D 11 Device Manager successfully!\n", name);
+                    }
+                }
+
                 ConfigureCodecAPI(candidate.Get(), fps, bitrateBps);
 
                 if (ConfigureEncoderMediaTypes(candidate.Get(), width, height, fps, bitrateBps)) {
-                    wprintf(L"Selected Zero-Latency Encoder: %s (Async=%u)\n", name, isAsync);
+                    wprintf(L"Selected Zero-Latency Encoder: %s (Async=%u, Mode=%s)\n", name, isAsync, (searchMode == 0 ? L"Hardware" : L"Software"));
                     outTransform = candidate;
                     outIsAsync = (isAsync != 0);
                     for (UINT32 j = 0; j < count; j++) activates[j]->Release();
@@ -172,14 +249,107 @@ static bool FindAndActivateEncoder(ComPtr<IMFTransform>& outTransform, bool& out
                 }
             }
         }
+        for (UINT32 i = 0; i < count; i++) activates[i]->Release();
+        CoTaskMemFree(activates);
     }
-
-    for (UINT32 i = 0; i < count; i++) activates[i]->Release();
-    CoTaskMemFree(activates);
     return false;
 }
 
-bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps) {
+bool HwEncoder::InitGpuPipeline(ID3D11Device* d3dDevice, ID3D11DeviceContext* d3dContext, UINT inWidth, UINT inHeight) {
+    if (!d3dDevice || !d3dContext || !dxgiManager_) return false;
+    d3dDevice_ = d3dDevice;
+    d3dContext_ = d3dContext;
+
+    if (inWidth == 0) inWidth = width_;
+    if (inHeight == 0) inHeight = height_;
+
+    // Setup D3D11 Video Processor for zero-latency GPU color conversion (BGRA -> NV12) and downscaling
+    HRESULT hr = d3dDevice_->QueryInterface(IID_PPV_ARGS(videoDevice_.ReleaseAndGetAddressOf()));
+    if (FAILED(hr)) {
+        printf("[HwEncoder] ID3D11VideoDevice query failed: 0x%08x\n", hr);
+        return false;
+    }
+
+    hr = d3dContext_->QueryInterface(IID_PPV_ARGS(videoContext_.ReleaseAndGetAddressOf()));
+    if (FAILED(hr)) {
+        printf("[HwEncoder] ID3D11VideoContext query failed: 0x%08x\n", hr);
+        return false;
+    }
+
+    // Allocate persistent renderable NV12 textures in GPU VRAM (triple-buffered ring)
+    D3D11_TEXTURE2D_DESC nv12Desc = {};
+    nv12Desc.Width = width_;
+    nv12Desc.Height = height_;
+    nv12Desc.MipLevels = 1;
+    nv12Desc.ArraySize = 1;
+    nv12Desc.Format = DXGI_FORMAT_NV12;
+    nv12Desc.SampleDesc.Count = 1;
+    nv12Desc.Usage = D3D11_USAGE_DEFAULT;
+    nv12Desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC vpDesc = {};
+    vpDesc.InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE;
+    vpDesc.InputFrameRate.Numerator = fps_;
+    vpDesc.InputFrameRate.Denominator = 1;
+    vpDesc.InputWidth = inWidth;
+    vpDesc.InputHeight = inHeight;
+    vpDesc.OutputWidth = width_;
+    vpDesc.OutputHeight = height_;
+    vpDesc.OutputFrameRate.Numerator = fps_;
+    vpDesc.OutputFrameRate.Denominator = 1;
+    vpDesc.Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL;
+
+    hr = videoDevice_->CreateVideoProcessorEnumerator(&vpDesc, vpEnum_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) {
+        printf("[HwEncoder] CreateVideoProcessorEnumerator failed: 0x%08x\n", hr);
+        return false;
+    }
+
+    hr = videoDevice_->CreateVideoProcessor(vpEnum_.Get(), 0, videoProcessor_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) {
+        printf("[HwEncoder] CreateVideoProcessor failed: 0x%08x\n", hr);
+        return false;
+    }
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outViewDesc = {};
+    outViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    outViewDesc.Texture2D.MipSlice = 0;
+
+    for (size_t i = 0; i < GPU_RING_SIZE; i++) {
+        hr = d3dDevice_->CreateTexture2D(&nv12Desc, nullptr, nv12Textures_[i].ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            printf("[HwEncoder] Failed to create NV12 GPU texture [%zu]: 0x%08x\n", i, hr);
+            return false;
+        }
+
+        hr = videoDevice_->CreateVideoProcessorOutputView(nv12Textures_[i].Get(), vpEnum_.Get(), &outViewDesc, vpOutputViews_[i].ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            printf("[HwEncoder] CreateVideoProcessorOutputView [%zu] failed: 0x%08x\n", i, hr);
+            return false;
+        }
+
+        hr = MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), nv12Textures_[i].Get(), 0, FALSE, dxgiMediaBuffers_[i].ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            printf("[HwEncoder] MFCreateDXGISurfaceBuffer [%zu] failed: 0x%08x\n", i, hr);
+            return false;
+        }
+
+        hr = MFCreateSample(gpuSamples_[i].ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            printf("[HwEncoder] MFCreateSample [%zu] failed: 0x%08x\n", i, hr);
+            return false;
+        }
+        gpuSamples_[i]->AddBuffer(dxgiMediaBuffers_[i].Get());
+    }
+
+    gpuIndex_ = 0;
+    printf("[HwEncoder] Zero-Copy D3D11 Hardware Video Pipeline initialized in GPU VRAM (%ux%u -> %ux%u NV12, triple-buffered)\n",
+           inWidth, inHeight, width_, height_);
+    isGpuAccelerated_ = true;
+    return true;
+}
+
+bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps, ID3D11Device* d3dDevice, ID3D11DeviceContext* d3dContext, UINT inWidth, UINT inHeight) {
     width_ = width;
     height_ = height;
     fps_ = fps;
@@ -190,7 +360,22 @@ bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps) {
         return false;
     }
 
-    if (!FindAndActivateEncoder(encoder_, isAsync_, width, height, fps, bitrateBps)) {
+    // 1. Initialize Direct3D 11 Device Manager FIRST
+    if (d3dDevice && d3dContext) {
+        d3dDevice_ = d3dDevice;
+        d3dContext_ = d3dContext;
+        hr = MFCreateDXGIDeviceManager(&resetToken_, dxgiManager_.ReleaseAndGetAddressOf());
+        if (SUCCEEDED(hr)) {
+            hr = dxgiManager_->ResetDevice(d3dDevice_.Get(), resetToken_);
+            if (FAILED(hr)) {
+                printf("[HwEncoder] dxgiManager ResetDevice failed: 0x%08x\n", hr);
+                dxgiManager_.Reset();
+            }
+        }
+    }
+
+    // 2. Find and activate encoder (hardware MFT prioritized, D3D manager linked before media types)
+    if (!FindAndActivateEncoder(encoder_, isAsync_, width, height, fps, bitrateBps, dxgiManager_.Get())) {
         printf("Could not find or configure any H.264 encoder MFT.\n");
         return false;
     }
@@ -201,11 +386,32 @@ bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps) {
         return false;
     }
 
+    // 3. For async MFT: setup IMFMediaEventGenerator and callback BEFORE notifying stream start
+    if (isAsync_) {
+        hr = encoder_->QueryInterface(IID_PPV_ARGS(eventGen_.ReleaseAndGetAddressOf()));
+        if (SUCCEEDED(hr)) {
+            eventCallback_ = new EncoderEventCallback(this);
+            isStreaming_ = true;
+            canAcceptInput_ = false;
+            eventGen_->BeginGetEvent(eventCallback_.Get(), nullptr);
+        } else {
+            printf("[HwEncoder] QueryInterface IMFMediaEventGenerator failed: 0x%08x\n", hr);
+        }
+    }
+
     encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
 
-    // Pre-allocate reusable input sample & buffer to eliminate per-frame heap allocations
+    // 4. Setup Video Processor zero-copy pipeline
+    if (d3dDevice && d3dContext) {
+        if (!InitGpuPipeline(d3dDevice, d3dContext, inWidth, inHeight)) {
+            printf("[HwEncoder] GPU pipeline init failed, falling back to parallel AVX2 CPU path.\n");
+            isGpuAccelerated_ = false;
+        }
+    }
+
+    // Pre-allocate reusable input sample & buffer to eliminate per-frame heap allocations (for CPU fallback)
     DWORD inBufSize = (DWORD)((size_t)width * height * 3 / 2);
     hr = MFCreateMemoryBuffer(inBufSize, inBuffer_.GetAddressOf());
     if (SUCCEEDED(hr)) {
@@ -221,7 +427,8 @@ bool HwEncoder::Init(UINT width, UINT height, UINT fps, UINT bitrateBps) {
         outSampleHolder_->AddBuffer(outBufferHolder_.Get());
     }
 
-    printf("H.264 Zero-Latency Parallel Encoder ready: %ux%u @ %ufps, %u bps\n", width, height, fps, bitrateBps);
+    printf("H.264 Zero-Latency Parallel Encoder ready: %ux%u @ %ufps, %u bps (GPU Zero-Copy: %s)\n",
+           width, height, fps, bitrateBps, isGpuAccelerated_ ? "ENABLED" : "DISABLED");
     return true;
 }
 
@@ -248,9 +455,9 @@ void HwEncoder::SetBitrate(UINT bitrateBps) {
         v.ulVal = bitrateBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &v);
 
-        // Allow peak burst up to 2.5x target bitrate during motion spikes
-        UINT peakBps = (UINT)(bitrateBps * 2.5f);
-        if (peakBps > 150000000) peakBps = 150000000;
+        // Allow peak burst up to 1.5x target bitrate during motion spikes (up to 200 Mbps)
+        UINT peakBps = (UINT)(bitrateBps * 1.5f);
+        if (peakBps > 200000000) peakBps = 200000000;
         v.ulVal = peakBps;
         codecApi->SetValue(&CODECAPI_AVEncCommonMaxBitRate, &v);
 
@@ -363,9 +570,23 @@ void HwEncoder::ConvertBgraToNv12(const uint8_t* bgra, UINT stride, uint8_t* dst
 void HwEncoder::EncodeFrame(const uint8_t* bgra, UINT stride) {
     if (!inBuffer_ || !inSample_) return;
 
+    if (isAsync_) {
+        std::unique_lock<std::mutex> lock(inputMutex_);
+        if (!canAcceptInput_) {
+            inputCv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
+                return canAcceptInput_.load() || !isStreaming_.load();
+            });
+        }
+        if (!canAcceptInput_ || !isStreaming_) return;
+        canAcceptInput_ = false;
+    }
+
     BYTE* dst = nullptr;
     HRESULT hr = inBuffer_->Lock(&dst, nullptr, nullptr);
-    if (FAILED(hr) || !dst) return;
+    if (FAILED(hr) || !dst) {
+        if (isAsync_) canAcceptInput_ = true;
+        return;
+    }
 
     ConvertBgraToNv12(bgra, stride, dst);
 
@@ -379,11 +600,16 @@ void HwEncoder::EncodeFrame(const uint8_t* bgra, UINT stride) {
     frameCount_++;
 
     hr = encoder_->ProcessInput(0, inSample_.Get(), 0);
-    if (FAILED(hr) && hr != MF_E_NOTACCEPTING) {
+    if (FAILED(hr)) {
+        if (isAsync_ && hr != MF_E_NOTACCEPTING) {
+            canAcceptInput_ = true;
+        }
         printf("ProcessInput failed: 0x%08x\n", hr);
     }
 
-    DrainOutput();
+    if (!isAsync_) {
+        DrainOutput();
+    }
 }
 
 void HwEncoder::EncodeFrame(const std::vector<uint8_t>& bgra, UINT stride) {
@@ -402,7 +628,14 @@ void HwEncoder::DrainOutput() {
 
         HRESULT hr = encoder_->ProcessOutput(0, 1, &outBuf, &status);
         if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) break;
-        if (FAILED(hr)) break;
+        if (FAILED(hr)) {
+            static DWORD lastPrint = 0;
+            if (GetTickCount() - lastPrint > 1000) {
+                printf("[HwEncoder] ProcessOutput returned 0x%08x\n", hr);
+                lastPrint = GetTickCount();
+            }
+            break;
+        }
 
         IMFSample* outSample = outBuf.pSample;
         if (outSample) {
@@ -426,11 +659,157 @@ void HwEncoder::DrainOutput() {
     }
 }
 
+void HwEncoder::DrainAsyncOutput() {
+    if (!encoder_ || !isStreaming_) return;
+
+    std::lock_guard<std::mutex> lock(outputMutex_);
+
+    MFT_OUTPUT_DATA_BUFFER outBuf = {};
+    outBuf.dwStreamID = 0;
+    DWORD status = 0;
+
+    bool mftProvidesSamples = (streamInfo_.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) != 0;
+    if (!mftProvidesSamples) {
+        if (!outSampleHolder_) return;
+        outBuf.pSample = outSampleHolder_.Get();
+        if (outBufferHolder_) {
+            outBufferHolder_->SetCurrentLength(0);
+        }
+    } else {
+        outBuf.pSample = nullptr;
+    }
+
+    HRESULT hr = encoder_->ProcessOutput(0, 1, &outBuf, &status);
+    if (SUCCEEDED(hr) && outBuf.pSample) {
+        IMFSample* outSample = outBuf.pSample;
+        ComPtr<IMFMediaBuffer> contiguous;
+        if (SUCCEEDED(outSample->ConvertToContiguousBuffer(contiguous.GetAddressOf()))) {
+            BYTE* data = nullptr;
+            DWORD len = 0;
+            if (SUCCEEDED(contiguous->Lock(&data, nullptr, &len))) {
+                if (OnNal && len > 0) {
+                    OnNal(data, len);
+                }
+                contiguous->Unlock();
+            }
+        }
+        if (mftProvidesSamples) {
+            outSample->Release();
+        }
+    } else if (hr != MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        static DWORD lastAsyncPrint = 0;
+        if (GetTickCount() - lastAsyncPrint > 1000) {
+            printf("[HwEncoder] DrainAsyncOutput ProcessOutput returned 0x%08x\n", hr);
+            lastAsyncPrint = GetTickCount();
+        }
+    }
+
+    if (outBuf.pEvents) {
+        outBuf.pEvents->Release();
+    }
+}
+
+bool HwEncoder::EncodeFrameGpu(ID3D11Texture2D* bgraTexture) {
+    if (!isGpuAccelerated_ || !bgraTexture || !videoDevice_ || !videoContext_ || !videoProcessor_) {
+        return false;
+    }
+
+    if (isAsync_) {
+        std::unique_lock<std::mutex> lock(inputMutex_);
+        if (!canAcceptInput_) {
+            inputCv_.wait_for(lock, std::chrono::milliseconds(10), [this] {
+                return canAcceptInput_.load() || !isStreaming_.load();
+            });
+        }
+        if (!canAcceptInput_ || !isStreaming_) {
+            return false;
+        }
+        canAcceptInput_ = false;
+    }
+
+    if (bgraTexture != lastBgraTexture_ || !vpInputView_) {
+        D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inViewDesc = {};
+        inViewDesc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+        inViewDesc.Texture2D.MipSlice = 0;
+        inViewDesc.Texture2D.ArraySlice = 0;
+
+        HRESULT hr = videoDevice_->CreateVideoProcessorInputView(bgraTexture, vpEnum_.Get(), &inViewDesc, vpInputView_.ReleaseAndGetAddressOf());
+        if (FAILED(hr)) {
+            if (isAsync_) canAcceptInput_ = true;
+            return false;
+        }
+        lastBgraTexture_ = bgraTexture;
+    }
+
+    size_t curIdx = gpuIndex_;
+    gpuIndex_ = (gpuIndex_ + 1) % GPU_RING_SIZE;
+
+    D3D11_VIDEO_PROCESSOR_STREAM stream = {};
+    stream.Enable = TRUE;
+    stream.pInputSurface = vpInputView_.Get();
+
+    // Zero-latency hardware GPU conversion (BGRA -> NV12) & scaling in VRAM (< 0.2 ms)
+    HRESULT hr = videoContext_->VideoProcessorBlt(videoProcessor_.Get(), vpOutputViews_[curIdx].Get(), 0, 1, &stream);
+    if (FAILED(hr)) {
+        if (isAsync_) canAcceptInput_ = true;
+        return false;
+    }
+
+    LONGLONG duration = (LONGLONG)(10000000.0 / fps_);
+    gpuSamples_[curIdx]->SetSampleTime(frameCount_ * duration);
+    gpuSamples_[curIdx]->SetSampleDuration(duration);
+    frameCount_++;
+
+    hr = encoder_->ProcessInput(0, gpuSamples_[curIdx].Get(), 0);
+    if (FAILED(hr)) {
+        if (isAsync_ && hr != MF_E_NOTACCEPTING) {
+            canAcceptInput_ = true;
+        }
+        static DWORD lastInputPrint = 0;
+        if (GetTickCount() - lastInputPrint > 1000) {
+            printf("[HwEncoder] GPU ProcessInput returned 0x%08x\n", hr);
+            lastInputPrint = GetTickCount();
+        }
+        return false;
+    }
+
+    if (!isAsync_) {
+        DrainOutput();
+    }
+    return true;
+}
+
 void HwEncoder::Shutdown() {
+    isStreaming_ = false;
+    canAcceptInput_ = false;
+    inputCv_.notify_all();
+
+    std::lock_guard<std::mutex> lock(outputMutex_);
+
     if (encoder_) {
         encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
     }
+    eventGen_.Reset();
+    eventCallback_.Reset();
+
+    for (size_t i = 0; i < GPU_RING_SIZE; i++) {
+        gpuSamples_[i].Reset();
+        dxgiMediaBuffers_[i].Reset();
+        vpOutputViews_[i].Reset();
+        nv12Textures_[i].Reset();
+    }
+    vpInputView_.Reset();
+    lastBgraTexture_ = nullptr;
+    videoProcessor_.Reset();
+    vpEnum_.Reset();
+    videoContext_.Reset();
+    videoDevice_.Reset();
+    dxgiManager_.Reset();
+    d3dContext_.Reset();
+    d3dDevice_.Reset();
+    isGpuAccelerated_ = false;
+
     inSample_.Reset();
     inBuffer_.Reset();
     outSampleHolder_.Reset();

@@ -36,12 +36,26 @@ bool DesktopCapture::Init(UINT outputIndex) {
                 adapter->GetDesc1(&adDesc);
 
                 D3D_FEATURE_LEVEL featureLevel;
+                UINT createFlags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
                 hr = D3D11CreateDevice(
-                    adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0,
+                    adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, createFlags,
                     nullptr, 0, D3D11_SDK_VERSION,
                     device_.ReleaseAndGetAddressOf(), &featureLevel, context_.ReleaseAndGetAddressOf());
 
+                if (FAILED(hr)) {
+                    // Fallback to BGRA support only if video support is not exposed on driver
+                    hr = D3D11CreateDevice(
+                        adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                        nullptr, 0, D3D11_SDK_VERSION,
+                        device_.ReleaseAndGetAddressOf(), &featureLevel, context_.ReleaseAndGetAddressOf());
+                }
+
                 if (SUCCEEDED(hr)) {
+                    ComPtr<ID3D10Multithread> multithread;
+                    if (SUCCEEDED(device_.As(&multithread))) {
+                        multithread->SetMultithreadProtected(TRUE);
+                    }
+
                     ComPtr<IDXGIOutput1> output1;
                     if (SUCCEEDED(output.As(&output1))) {
                         hr = output1->DuplicateOutput(device_.Get(), duplication_.ReleaseAndGetAddressOf());
@@ -84,6 +98,20 @@ bool DesktopCapture::Init(UINT outputIndex) {
     if (FAILED(hr)) {
         printf("CreateTexture2D (staging) failed: 0x%08x\n", hr);
         return false;
+    }
+
+    D3D11_TEXTURE2D_DESC gpuDesc = {};
+    gpuDesc.Width = width_;
+    gpuDesc.Height = height_;
+    gpuDesc.MipLevels = 1;
+    gpuDesc.ArraySize = 1;
+    gpuDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    gpuDesc.SampleDesc.Count = 1;
+    gpuDesc.Usage = D3D11_USAGE_DEFAULT;
+    gpuDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    hr = device_->CreateTexture2D(&gpuDesc, nullptr, gpuTexture_.ReleaseAndGetAddressOf());
+    if (FAILED(hr)) {
+        printf("CreateTexture2D (gpu) failed: 0x%08x\n", hr);
     }
 
     // Initialize cursor rendering DC and 32-bit DIB
@@ -325,6 +353,50 @@ bool DesktopCapture::GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UI
     return true;
 }
 
+bool DesktopCapture::GrabFrameGpu(ID3D11Texture2D** ppTexture, UINT timeoutMs) {
+    if (!duplication_ || !gpuTexture_) {
+        static DWORD lastRetryTick = 0;
+        DWORD nowTick = GetTickCount();
+        if (nowTick - lastRetryTick < 250) {
+            Sleep(10);
+            return false;
+        }
+        lastRetryTick = nowTick;
+        printf("[DesktopCapture] Re-initializing GPU capture after game/display mode change...\n");
+        if (!Init(outputIndex_)) {
+            return false;
+        }
+        wasReinitialized_ = true;
+        printf("[DesktopCapture] Successfully re-hooked GPU desktop capture for game!\n");
+    }
+
+    ComPtr<IDXGIResource> desktopResource;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo = {};
+
+    HRESULT hr = duplication_->AcquireNextFrame(timeoutMs, &frameInfo, desktopResource.GetAddressOf());
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        return false;
+    }
+    if (FAILED(hr)) {
+        printf("[DesktopCapture] AcquireNextFrame failed (0x%08x) -- resetting for game launch/mode switch...\n", hr);
+        Shutdown();
+        return false;
+    }
+
+    ComPtr<ID3D11Texture2D> frameTexture;
+    hr = desktopResource.As(&frameTexture);
+    if (FAILED(hr)) {
+        duplication_->ReleaseFrame();
+        return false;
+    }
+
+    context_->CopyResource(gpuTexture_.Get(), frameTexture.Get());
+    duplication_->ReleaseFrame();
+
+    *ppTexture = gpuTexture_.Get();
+    return true;
+}
+
 void DesktopCapture::Shutdown() {
     if (cursorHdc_) {
         SelectObject(cursorHdc_, cursorOldBmp_);
@@ -339,6 +411,7 @@ void DesktopCapture::Shutdown() {
         duplication_->ReleaseFrame();
         duplication_.Reset();
     }
+    gpuTexture_.Reset();
     stagingTexture_.Reset();
     context_.Reset();
     device_.Reset();

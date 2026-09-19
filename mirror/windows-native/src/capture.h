@@ -1,5 +1,6 @@
 #pragma once
-#include <d3d11.h>
+#include <d3d11_1.h>
+#include <d3d10_1.h>
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <vector>
@@ -11,7 +12,11 @@ class DesktopCapture {
 public:
     bool Init(UINT outputIndex = 0);
     bool GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UINT& outHeight, UINT& outStride, UINT timeoutMs = 100);
+    bool GrabFrameGpu(ID3D11Texture2D** ppTexture, UINT timeoutMs = 16);
     void Shutdown();
+
+    ID3D11Device* GetDevice() const { return device_.Get(); }
+    ID3D11DeviceContext* GetContext() const { return context_.Get(); }
 
     UINT GetWidth() const { return width_; }
     UINT GetHeight() const { return height_; }
@@ -34,6 +39,7 @@ private:
     ComPtr<ID3D11DeviceContext> context_;
     ComPtr<IDXGIOutputDuplication> duplication_;
     ComPtr<ID3D11Texture2D> stagingTexture_;
+    ComPtr<ID3D11Texture2D> gpuTexture_;
     UINT width_ = 0;
     UINT height_ = 0;
     UINT outputIndex_ = 0;
