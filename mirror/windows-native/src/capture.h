@@ -20,6 +20,9 @@ public:
 
     UINT GetWidth() const { return width_; }
     UINT GetHeight() const { return height_; }
+    bool IsInitialized() const { return duplication_ != nullptr && gpuTexture_ != nullptr; }
+
+    void ResetDuplicationOnly();
 
     bool CheckAndClearReinitialized() {
         bool val = wasReinitialized_;

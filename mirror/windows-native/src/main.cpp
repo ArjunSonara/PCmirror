@@ -78,15 +78,11 @@ int main(int argc, char** argv) {
 
     DesktopCapture capture;
     if (!capture.Init()) {
-        printf("\n[ERROR] Failed to initialize Desktop Duplication Capture.\n");
-        printf("Please ensure your display driver is running normally.\n");
-        CoUninitialize();
-        if (hMutex) CloseHandle(hMutex);
-        return 1;
+        printf("[WARN] Initial Desktop Duplication Capture not ready (display mode change/fullscreen). Will initialize on client connect...\n");
     }
 
-    UINT streamWidth = customWidth ? customWidth : capture.GetWidth();
-    UINT streamHeight = customHeight ? customHeight : capture.GetHeight();
+    UINT streamWidth = customWidth ? customWidth : (capture.GetWidth() ? capture.GetWidth() : 1920);
+    UINT streamHeight = customHeight ? customHeight : (capture.GetHeight() ? capture.GetHeight() : 1080);
     printf("Target video resolution: %ux%u @ %u fps (%.1f Mbps)\n", streamWidth, streamHeight, fps, bitrate / 1000000.0f);
 
     InputServer inputServer;
@@ -125,6 +121,20 @@ int main(int argc, char** argv) {
             continue;
         }
 
+        // Ensure capture is ready before starting encoder
+        if (!capture.GetDevice() || capture.GetWidth() == 0) {
+            printf("[PC Mirror] Initializing desktop capture for incoming client...\n");
+            int retry = 0;
+            while (g_running && !capture.Init() && retry < 15) {
+                Sleep(200);
+                retry++;
+            }
+            if (capture.GetWidth() > 0) {
+                if (!customWidth) streamWidth = capture.GetWidth();
+                if (!customHeight) streamHeight = capture.GetHeight();
+            }
+        }
+
         VideoCodec currentCodec = CODEC_HEVC;
         std::atomic<bool> codecChangeRequested{ false };
         std::atomic<uint32_t> reqCodec{ (uint32_t)currentCodec };
@@ -137,6 +147,9 @@ int main(int argc, char** argv) {
             continue;
         }
         currentCodec = encoder.GetCodec(); // In case of fallback to H.264
+
+        std::mutex encoderMutex;
+        HwEncoder* activeEncoder = &encoder;
 
         std::atomic<bool> resChangeRequested{ false };
         UINT reqWidth = streamWidth;
@@ -151,8 +164,8 @@ int main(int argc, char** argv) {
         };
 
         inputServer.OnResolutionChange = [&](uint32_t w, uint32_t h) {
-            reqWidth = w ? w : capture.GetWidth();
-            reqHeight = h ? h : capture.GetHeight();
+            reqWidth = w ? w : (capture.GetWidth() ? capture.GetWidth() : 1920);
+            reqHeight = h ? h : (capture.GetHeight() ? capture.GetHeight() : 1080);
             resChangeRequested = true;
         };
 
@@ -172,7 +185,10 @@ int main(int argc, char** argv) {
         };
 
         inputServer.OnKeyframeRequest = [&]() {
-            encoder.RequestKeyframe();
+            std::lock_guard<std::mutex> lk(encoderMutex);
+            if (activeEncoder) {
+                activeEncoder->RequestKeyframe();
+            }
         };
 
         double targetFrameInterval = 1.0 / fps;
@@ -180,7 +196,10 @@ int main(int argc, char** argv) {
         inputServer.OnFpsChange = [&](uint32_t newFps) {
             if (newFps >= 30 && newFps <= 144) {
                 fps = newFps;
-                encoder.SetFps(newFps);
+                std::lock_guard<std::mutex> lk(encoderMutex);
+                if (activeEncoder) {
+                    activeEncoder->SetFps(newFps);
+                }
                 targetFrameInterval = 1.0 / (double)fps;
                 printf("[PC Mirror] Dynamic Frame Rate switched to %u FPS (target interval: %.2f ms)\n", fps, targetFrameInterval * 1000.0);
             }
@@ -295,9 +314,17 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(queueMutex);
                     sendQueue.clear();
                 }
+                {
+                    std::lock_guard<std::mutex> lk(encoderMutex);
+                    activeEncoder = nullptr;
+                }
                 encoder.Shutdown();
                 encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
                 currentCodec = encoder.GetCodec();
+                {
+                    std::lock_guard<std::mutex> lk(encoderMutex);
+                    activeEncoder = &encoder;
+                }
                 encoder.RequestKeyframe();
             }
 
@@ -310,8 +337,16 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(queueMutex);
                     sendQueue.clear();
                 }
+                {
+                    std::lock_guard<std::mutex> lk(encoderMutex);
+                    activeEncoder = nullptr;
+                }
                 encoder.Shutdown();
                 encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
+                {
+                    std::lock_guard<std::mutex> lk(encoderMutex);
+                    activeEncoder = &encoder;
+                }
                 encoder.RequestKeyframe();
             }
 
@@ -323,8 +358,16 @@ int main(int argc, char** argv) {
                     std::lock_guard<std::mutex> lock(queueMutex);
                     sendQueue.clear();
                 }
+                {
+                    std::lock_guard<std::mutex> lk(encoderMutex);
+                    activeEncoder = nullptr;
+                }
                 encoder.Shutdown();
                 encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
+                {
+                    std::lock_guard<std::mutex> lk(encoderMutex);
+                    activeEncoder = &encoder;
+                }
                 encoder.RequestKeyframe();
             }
 
@@ -335,7 +378,23 @@ int main(int argc, char** argv) {
                 ID3D11Texture2D* gpuTex = nullptr;
                 if (capture.GrabFrameGpu(&gpuTex, 2)) {
                     if (capture.CheckAndClearReinitialized()) {
-                        printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
+                        printf("[PC Mirror] Game/display switch detected (res: %ux%u) -- re-syncing encoder pipeline...\n", capture.GetWidth(), capture.GetHeight());
+                        streamWidth = customWidth ? customWidth : (capture.GetWidth() ? capture.GetWidth() : 1920);
+                        streamHeight = customHeight ? customHeight : (capture.GetHeight() ? capture.GetHeight() : 1080);
+                        {
+                            std::lock_guard<std::mutex> lock(queueMutex);
+                            sendQueue.clear();
+                        }
+                        {
+                            std::lock_guard<std::mutex> lk(encoderMutex);
+                            activeEncoder = nullptr;
+                        }
+                        encoder.Shutdown();
+                        encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
+                        {
+                            std::lock_guard<std::mutex> lk(encoderMutex);
+                            activeEncoder = &encoder;
+                        }
                         encoder.RequestKeyframe();
                     }
                     QueryPerformanceCounter(&tCap1);
@@ -356,12 +415,30 @@ int main(int argc, char** argv) {
                             frameCount++;
                         }
                     }
+                } else {
+                    Sleep(2);
                 }
             } else {
                 // CPU fallback path (AVX2)
                 if (capture.GrabFrame(bgra, w, h, stride, 2)) {
                     if (capture.CheckAndClearReinitialized()) {
-                        printf("[PC Mirror] Game/display switch detected -- sending fresh keyframe to Android...\n");
+                        printf("[PC Mirror] Game/display switch detected (res: %ux%u) -- re-syncing encoder pipeline...\n", capture.GetWidth(), capture.GetHeight());
+                        streamWidth = customWidth ? customWidth : (capture.GetWidth() ? capture.GetWidth() : 1920);
+                        streamHeight = customHeight ? customHeight : (capture.GetHeight() ? capture.GetHeight() : 1080);
+                        {
+                            std::lock_guard<std::mutex> lock(queueMutex);
+                            sendQueue.clear();
+                        }
+                        {
+                            std::lock_guard<std::mutex> lk(encoderMutex);
+                            activeEncoder = nullptr;
+                        }
+                        encoder.Shutdown();
+                        encoder.Init(streamWidth, streamHeight, fps, bitrate, capture.GetDevice(), capture.GetContext(), capture.GetWidth(), capture.GetHeight(), currentCodec);
+                        {
+                            std::lock_guard<std::mutex> lk(encoderMutex);
+                            activeEncoder = &encoder;
+                        }
                         encoder.RequestKeyframe();
                     }
                     QueryPerformanceCounter(&tCap1);
@@ -392,6 +469,8 @@ int main(int argc, char** argv) {
                         totalEncSec += (tEnc1.QuadPart - tEnc0.QuadPart) / (double)freq.QuadPart;
                         frameCount++;
                     }
+                } else {
+                    Sleep(2);
                 }
             }
 
@@ -419,6 +498,19 @@ int main(int argc, char** argv) {
         if (senderThread.joinable()) {
             senderThread.join();
         }
+
+        {
+            std::lock_guard<std::mutex> lk(encoderMutex);
+            activeEncoder = nullptr;
+        }
+        inputServer.OnKeyframeRequest = nullptr;
+        inputServer.OnFpsChange = nullptr;
+        inputServer.OnBitrateChange = nullptr;
+        inputServer.OnResolutionChange = nullptr;
+        inputServer.OnCodecChange = nullptr;
+        inputServer.OnCongestionScale = nullptr;
+        inputServer.OnCursorToggle = nullptr;
+
         encoder.Shutdown();
         if (g_running) {
             printf("[Notice] Client disconnected. Re-listening for connection...\n");

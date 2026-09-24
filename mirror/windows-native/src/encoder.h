@@ -75,6 +75,7 @@ private:
     std::mutex inputMutex_;
     std::condition_variable inputCv_;
     std::mutex outputMutex_;
+    std::mutex shutdownMutex_;
     std::atomic<bool> isStreaming_{ false };
 
     UINT width_ = 0;

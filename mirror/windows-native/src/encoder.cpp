@@ -44,12 +44,19 @@ private:
 };
 
 STDMETHODIMP EncoderEventCallback::Invoke(IMFAsyncResult* pResult) {
-    if (!parent_ || !parent_->isStreaming_ || !parent_->eventGen_) {
-        return S_OK;
+    if (!parent_) return S_OK;
+
+    ComPtr<IMFMediaEventGenerator> gen;
+    {
+        std::lock_guard<std::mutex> lock(parent_->shutdownMutex_);
+        if (!parent_->isStreaming_ || !parent_->eventGen_) {
+            return S_OK;
+        }
+        gen = parent_->eventGen_;
     }
 
     ComPtr<IMFMediaEvent> pEvent;
-    HRESULT hr = parent_->eventGen_->EndGetEvent(pResult, pEvent.GetAddressOf());
+    HRESULT hr = gen->EndGetEvent(pResult, pEvent.GetAddressOf());
     if (FAILED(hr)) return hr;
 
     MediaEventType met = MEUnknown;
@@ -62,8 +69,11 @@ STDMETHODIMP EncoderEventCallback::Invoke(IMFAsyncResult* pResult) {
         parent_->DrainAsyncOutput();
     }
 
-    if (parent_->isStreaming_ && parent_->eventGen_) {
-        parent_->eventGen_->BeginGetEvent(this, nullptr);
+    {
+        std::lock_guard<std::mutex> lock(parent_->shutdownMutex_);
+        if (parent_->isStreaming_ && parent_->eventGen_) {
+            parent_->eventGen_->BeginGetEvent(this, nullptr);
+        }
     }
     return S_OK;
 }
@@ -836,6 +846,8 @@ bool HwEncoder::EncodeFrameGpu(ID3D11Texture2D* bgraTexture) {
         HRESULT hr = videoDevice_->CreateVideoProcessorInputView(bgraTexture, vpEnum_.Get(), &inViewDesc, vpInputView_.ReleaseAndGetAddressOf());
         if (FAILED(hr)) {
             if (isAsync_) canAcceptInput_ = true;
+            vpInputView_.Reset();
+            lastBgraTexture_ = nullptr;
             return false;
         }
         lastBgraTexture_ = bgraTexture;
@@ -852,6 +864,8 @@ bool HwEncoder::EncodeFrameGpu(ID3D11Texture2D* bgraTexture) {
     HRESULT hr = videoContext_->VideoProcessorBlt(videoProcessor_.Get(), vpOutputViews_[curIdx].Get(), 0, 1, &stream);
     if (FAILED(hr)) {
         if (isAsync_) canAcceptInput_ = true;
+        vpInputView_.Reset();
+        lastBgraTexture_ = nullptr;
         return false;
     }
 
@@ -884,14 +898,18 @@ void HwEncoder::Shutdown() {
     canAcceptInput_ = false;
     inputCv_.notify_all();
 
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        eventGen_.Reset();
+        eventCallback_.Reset();
+    }
+
     std::lock_guard<std::mutex> lock(outputMutex_);
 
     if (encoder_) {
         encoder_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         encoder_->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
     }
-    eventGen_.Reset();
-    eventCallback_.Reset();
 
     for (size_t i = 0; i < GPU_RING_SIZE; i++) {
         gpuSamples_[i].Reset();

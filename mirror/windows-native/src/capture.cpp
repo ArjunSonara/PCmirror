@@ -42,38 +42,62 @@ bool DesktopCapture::Init(UINT outputIndex) {
                 DXGI_ADAPTER_DESC1 adDesc;
                 adapter->GetDesc1(&adDesc);
 
-                D3D_FEATURE_LEVEL featureLevel;
-                UINT createFlags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-                hr = D3D11CreateDevice(
-                    adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, createFlags,
-                    nullptr, 0, D3D11_SDK_VERSION,
-                    device_.ReleaseAndGetAddressOf(), &featureLevel, context_.ReleaseAndGetAddressOf());
-
-                if (FAILED(hr)) {
-                    // Fallback to BGRA support only if video support is not exposed on driver
-                    hr = D3D11CreateDevice(
-                        adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                        nullptr, 0, D3D11_SDK_VERSION,
-                        device_.ReleaseAndGetAddressOf(), &featureLevel, context_.ReleaseAndGetAddressOf());
-                }
-
-                if (SUCCEEDED(hr)) {
-                    ComPtr<ID3D10Multithread> multithread;
-                    if (SUCCEEDED(device_.As(&multithread))) {
-                        multithread->SetMultithreadProtected(TRUE);
-                    }
-
-                    // Boost GPU thread priority to maximum (+7) so WDDM prioritizes mirror capture ahead of heavy 3D games
+                bool canReuseDevice = false;
+                if (device_ && context_ && device_->GetDeviceRemovedReason() == S_OK) {
                     ComPtr<IDXGIDevice> dxgiDev;
                     if (SUCCEEDED(device_.As(&dxgiDev))) {
-                        HRESULT hrPrio = dxgiDev->SetGPUThreadPriority(7);
-                        if (SUCCEEDED(hrPrio)) {
-                            wprintf(L"[DesktopCapture] GPU Thread Priority boosted to +7 (VIP priority over 3D games)!\n");
+                        ComPtr<IDXGIAdapter> curAdapter;
+                        if (SUCCEEDED(dxgiDev->GetAdapter(curAdapter.GetAddressOf()))) {
+                            DXGI_ADAPTER_DESC curDesc;
+                            curAdapter->GetDesc(&curDesc);
+                            if (curDesc.AdapterLuid.LowPart == adDesc.AdapterLuid.LowPart &&
+                                curDesc.AdapterLuid.HighPart == adDesc.AdapterLuid.HighPart) {
+                                canReuseDevice = true;
+                            }
                         }
                     }
+                }
 
+                if (!canReuseDevice) {
+                    device_.Reset();
+                    context_.Reset();
+
+                    D3D_FEATURE_LEVEL featureLevel;
+                    UINT createFlags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+                    hr = D3D11CreateDevice(
+                        adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, createFlags,
+                        nullptr, 0, D3D11_SDK_VERSION,
+                        device_.ReleaseAndGetAddressOf(), &featureLevel, context_.ReleaseAndGetAddressOf());
+
+                    if (FAILED(hr)) {
+                        // Fallback to BGRA support only if video support is not exposed on driver
+                        hr = D3D11CreateDevice(
+                            adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                            nullptr, 0, D3D11_SDK_VERSION,
+                            device_.ReleaseAndGetAddressOf(), &featureLevel, context_.ReleaseAndGetAddressOf());
+                    }
+
+                    if (SUCCEEDED(hr)) {
+                        ComPtr<ID3D10Multithread> multithread;
+                        if (SUCCEEDED(device_.As(&multithread))) {
+                            multithread->SetMultithreadProtected(TRUE);
+                        }
+
+                        // Boost GPU thread priority to maximum (+7) so WDDM prioritizes mirror capture ahead of heavy 3D games
+                        ComPtr<IDXGIDevice> dxgiDev;
+                        if (SUCCEEDED(device_.As(&dxgiDev))) {
+                            HRESULT hrPrio = dxgiDev->SetGPUThreadPriority(7);
+                            if (SUCCEEDED(hrPrio)) {
+                                wprintf(L"[DesktopCapture] GPU Thread Priority boosted to +7 (VIP priority over 3D games)!\n");
+                            }
+                        }
+                    }
+                }
+
+                if (device_ && context_) {
                     ComPtr<IDXGIOutput1> output1;
                     if (SUCCEEDED(output.As(&output1))) {
+                        duplication_.Reset();
                         hr = output1->DuplicateOutput(device_.Get(), duplication_.ReleaseAndGetAddressOf());
                         if (SUCCEEDED(hr)) {
                             wprintf(L"Desktop Duplication active on adapter: %s (Output: %s)\n", adDesc.Description, outDesc.DeviceName);
@@ -91,8 +115,10 @@ bool DesktopCapture::Init(UINT outputIndex) {
     }
 
     if (!found) {
-        device_.Reset();
-        context_.Reset();
+        if (device_ && device_->GetDeviceRemovedReason() != S_OK) {
+            device_.Reset();
+            context_.Reset();
+        }
         return false;
     }
 
@@ -325,11 +351,12 @@ bool DesktopCapture::GrabFrame(std::vector<uint8_t>& outBgra, UINT& outWidth, UI
         return false;
     }
     if (FAILED(hr)) {
-        // Any failure (DXGI_ERROR_ACCESS_LOST 0x887a0026, DXGI_ERROR_INVALID_CALL 0x887a0001, etc.)
-        // indicates that a game launched, changed resolution/fullscreen mode, or reset the adapter.
-        // We must cleanly shut down and allow the next frame to re-hook.
-        printf("[DesktopCapture] AcquireNextFrame failed (0x%08x) -- resetting for game launch/mode switch...\n", hr);
-        Shutdown();
+        printf("[DesktopCapture] AcquireNextFrame failed (0x%08x) -- resetting duplication for game launch/mode switch...\n", hr);
+        ResetDuplicationOnly();
+        if (device_ && device_->GetDeviceRemovedReason() != S_OK) {
+            printf("[DesktopCapture] Underlying D3D11 device removed (0x%08x), resetting device...\n", device_->GetDeviceRemovedReason());
+            Shutdown();
+        }
         return false;
     }
 
@@ -394,8 +421,12 @@ bool DesktopCapture::GrabFrameGpu(ID3D11Texture2D** ppTexture, UINT timeoutMs) {
         return false;
     }
     if (FAILED(hr)) {
-        printf("[DesktopCapture] AcquireNextFrame failed (0x%08x) -- resetting for game launch/mode switch...\n", hr);
-        Shutdown();
+        printf("[DesktopCapture] AcquireNextFrame failed (0x%08x) -- resetting duplication for game launch/mode switch...\n", hr);
+        ResetDuplicationOnly();
+        if (device_ && device_->GetDeviceRemovedReason() != S_OK) {
+            printf("[DesktopCapture] Underlying D3D11 device removed (0x%08x), resetting device...\n", device_->GetDeviceRemovedReason());
+            Shutdown();
+        }
         return false;
     }
 
@@ -413,7 +444,18 @@ bool DesktopCapture::GrabFrameGpu(ID3D11Texture2D** ppTexture, UINT timeoutMs) {
     return true;
 }
 
+void DesktopCapture::ResetDuplicationOnly() {
+    if (duplication_) {
+        duplication_->ReleaseFrame();
+        duplication_.Reset();
+    }
+    gpuTexture_.Reset();
+    stagingTexture_.Reset();
+    pointerShapeBuf_.clear();
+}
+
 void DesktopCapture::Shutdown() {
+    ResetDuplicationOnly();
     if (cursorHdc_) {
         SelectObject(cursorHdc_, cursorOldBmp_);
         DeleteObject(cursorBmp_);
@@ -423,13 +465,6 @@ void DesktopCapture::Shutdown() {
         cursorPixels_ = nullptr;
         lastCursorHandle_ = NULL;
     }
-    if (duplication_) {
-        duplication_->ReleaseFrame();
-        duplication_.Reset();
-    }
-    gpuTexture_.Reset();
-    stagingTexture_.Reset();
     context_.Reset();
     device_.Reset();
-    pointerShapeBuf_.clear();
 }
